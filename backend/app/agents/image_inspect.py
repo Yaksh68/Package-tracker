@@ -22,10 +22,67 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import re
+import shutil
+import subprocess
+import time
 from pathlib import Path
 
+from ..config import get_settings
 from ..models import Ecosystem, Package
 from . import parsers
+
+
+# --------------------------------------------------------------------------- #
+# Is Docker usable here?                                                       #
+# --------------------------------------------------------------------------- #
+# Docker is a capability, not a requirement. Most cloud hosts have no daemon,
+# and the public mode mustn't run images users choose. Without it, the scan
+# skips the image inventory and the Docker-based apt version fallback, and it
+# isn't marked degraded. Base-image EOL and Dockerfile apt packages still come
+# from the HTTP-only apt-index path.
+_DOCKER_PROBE_TTL = 600.0  # seconds: a Docker started later is noticed within this
+_docker_probe: tuple[float, bool] | None = None
+
+
+def _probe_docker() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+def docker_available() -> bool:
+    """Whether a Docker daemon answers on this host. The answer is cached, so a
+    scan doesn't pay for the check every time."""
+    global _docker_probe
+    now = time.monotonic()
+    if _docker_probe is None or now - _docker_probe[0] > _DOCKER_PROBE_TTL:
+        _docker_probe = (now, _probe_docker())
+    return _docker_probe[1]
+
+
+def inspect_mode() -> tuple[bool, str]:
+    """(enabled, reason) for this host's Docker-based steps, from IMAGE_INSPECT:
+    "auto" uses Docker when it's there, "on" always tries (so a missing Docker
+    degrades the scan), "off" never does. Always off in the public mode.
+    Blocking (it may run `docker version`): call it from a worker thread."""
+    settings = get_settings()
+    if settings.public_mode():
+        return False, "it's off in the public mode, where it would run images users choose"
+    mode = (settings.image_inspect or "auto").strip().lower()
+    if mode == "off":
+        return False, "it's turned off (IMAGE_INSPECT=off)"
+    if mode == "on":
+        return True, "IMAGE_INSPECT=on"
+    if docker_available():
+        return True, "Docker is available"
+    return False, "Docker isn't available on this host"
 
 # conservative image-reference check; also blocks anything starting with "-"
 # so a ref can never be interpreted as a docker CLI flag.

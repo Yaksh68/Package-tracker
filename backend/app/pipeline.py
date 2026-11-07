@@ -216,8 +216,18 @@ async def run_scan(
                 _fail(repo.id, branch, "clone", str(e))
                 log.emit("clone", str(e), level="error")
 
+            # Docker is a capability (image_inspect.inspect_mode). Without it, the
+            # two Docker steps below are skipped and the scan isn't degraded.
+            docker_on, docker_why = await asyncio.to_thread(image_inspect.inspect_mode)
+
             # 2b. OS-package inventory of the detected Docker image(s) (dpkg parity)
-            if images_to_inspect:
+            if images_to_inspect and not docker_on:
+                log.emit("inspect",
+                         f"Skipped the OS-package inventory of {len(images_to_inspect)} "
+                         f"Docker image(s): {docker_why}. Base-image EOL and Dockerfile "
+                         "apt packages are still checked.",
+                         data={"images": images_to_inspect, "reason": docker_why})
+            elif images_to_inspect:
                 _phase("inspect")
                 for image in images_to_inspect:
                     t_img = _now()
@@ -280,7 +290,13 @@ async def run_scan(
 
             # 2d. Whatever is still unpinned (non-Ubuntu bases, index offline):
             # ask each base image's own apt what it would install.
-            if any(p.ecosystem.value == "apt" and not p.version for p in packages):
+            unpinned = sum(1 for p in packages if p.ecosystem.value == "apt" and not p.version)
+            if unpinned and not docker_on:
+                log.emit("inspect",
+                         f"{unpinned} apt package(s) stay without a version: asking the base "
+                         f"image needs Docker, and {docker_why}",
+                         data={"unpinned": unpinned, "reason": docker_why})
+            elif unpinned:
                 _phase("inspect")
                 t_res = _now()
                 try:
