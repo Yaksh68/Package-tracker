@@ -112,6 +112,12 @@ branch, planned release date, and interval. The first scan starts immediately.
 | `GITLAB_TOKEN` / `GITHUB_TOKEN` | Repo read PATs; injected into the clone URL at runtime, never stored in snapshots or logs |
 | `GITHUB_API_TOKEN` | Optional; raises GitHub API rate limit for enrichment (falls back to `GITHUB_TOKEN`) |
 | `CLAUDE_CLI_PATH` | Path to the `claude` binary if not on PATH |
+| `AI_PROVIDER` | Who researches ambiguous packages. Unset = the Claude CLI and its login (local mode only); `anthropic` = Anthropic API; `openai`, `gemini`, `groq`, `openrouter` = that provider's OpenAI-compatible API; `openai-compatible` = any other OpenAI-compatible endpoint at `AI_BASE_URL` |
+| `AI_MODEL` | Model for `AI_PROVIDER` (Anthropic default `claude-haiku-5-5`; required for the OpenAI-compatible ones) |
+| `AI_API_KEY` | The provider's API key (`anthropic` also accepts `ANTHROPIC_API_KEY`) |
+| `AI_BASE_URL` | Endpoint for `AI_PROVIDER=openai-compatible` (e.g. a local Ollama) |
+| `SEARCH_PROVIDER` / `SEARCH_API_KEY` | `tavily` or `exa`, plus its key. Required for the OpenAI-compatible providers, which have no built-in web search |
+| `AI_MAX_TOOL_ROUNDS` | Most tool rounds per OpenAI-compatible research conversation (default 8) |
 | `AGENT_BACKEND` | `subprocess` (default) / `sdk` / `auto` |
 | `AGENT_MODEL` | Model the agents use (default `claude-haiku-4-5-20251001`) |
 | `USE_EXTRACTION_AGENT` | `true` to run the AI extraction fallback for unusual manifests (off by default — deterministic parsers cover the common manifest formats) |

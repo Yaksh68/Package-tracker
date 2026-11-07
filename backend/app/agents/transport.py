@@ -147,6 +147,7 @@ async def _run_subprocess(
 
     result = AgentResult()
     texts: list[str] = []
+    tool_counts = {"WebSearch": 0, "WebFetch": 0}
     for line in stdout.decode(errors="replace").splitlines():
         line = line.strip()
         if not line:
@@ -163,6 +164,8 @@ async def _run_subprocess(
                     texts.append(block["text"])
                 elif block.get("type") == "tool_use":
                     _log_tool_use(block)
+                    if block.get("name") in tool_counts:
+                        tool_counts[block["name"]] += 1
         elif etype == "user":
             for block in ev.get("message", {}).get("content", []):
                 if isinstance(block, dict) and block.get("type") == "tool_result":
@@ -184,6 +187,15 @@ async def _run_subprocess(
             f"no events from claude CLI (rc={proc.returncode}); "
             f"stderr: {stderr.decode(errors='replace')[:300]}"
         )
+    # The CLI's WebSearch / WebFetch run as its own tools, and it reports them
+    # as 0 in usage.server_tool_use. Count them from the event stream instead,
+    # so the scan log and analytics show the searches that really happened.
+    srv = (result.usage or {}).get("server_tool_use") or {}
+    if not (srv.get("web_search_requests") or srv.get("web_fetch_requests")) and any(tool_counts.values()):
+        result.usage = {**(result.usage or {}), "server_tool_use": {
+            "web_search_requests": tool_counts["WebSearch"],
+            "web_fetch_requests": tool_counts["WebFetch"],
+        }}
     return result
 
 

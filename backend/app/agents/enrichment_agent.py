@@ -675,17 +675,18 @@ async def _run_ai_batch(
             errors.append(("invalid", f"invalid output: {ex}"))
             scanlog.emit("agent", f"AI batch output invalid ({ex}); retrying", level="warn")
             continue
-        seen = getattr(res, "seen_urls", None)
-        if seen is not None:
-            parsed, dropped = citations.enforce(parsed, seen)
-            if dropped["citations"] or dropped["verdicts"] or dropped["successors"]:
-                scanlog.emit(
-                    "agent",
-                    f"Citation check: dropped {dropped['citations']} citation(s) the research "
-                    f"never saw; {len(dropped['verdicts'])} unbacked verdict(s) kept their "
-                    "structured result",
-                    level="warn", data=dropped,
-                )
+        # Every problem verdict needs a citation, from every provider. When the
+        # provider shows what its searches returned, the citation must also be
+        # one of those pages.
+        parsed, dropped = citations.enforce(parsed, getattr(res, "seen_urls", None))
+        if dropped["citations"] or dropped["verdicts"] or dropped["successors"]:
+            scanlog.emit(
+                "agent",
+                f"Citation check: dropped {dropped['citations']} unseen citation(s); "
+                f"{len(dropped['verdicts'])} uncited verdict(s) kept their structured result, "
+                f"{len(dropped['successors'])} uncited successor(s) cleared",
+                level="warn", data=dropped,
+            )
         return parsed, spent
     return None, spent
 

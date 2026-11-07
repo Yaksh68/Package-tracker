@@ -29,14 +29,19 @@ def normalize(url: str) -> str:
     return urlunsplit((scheme, p.netloc.lower(), path, p.query, ""))
 
 
-def enforce(batch: AiVerdictBatch, seen_urls: set[str]) -> tuple[AiVerdictBatch, dict]:
-    """Return the batch with unseen citations removed, plus a report of what
-    was dropped: {"citations": n, "verdicts": [names], "successors": [names]}."""
-    seen = {normalize(u) for u in seen_urls if u}
+def enforce(batch: AiVerdictBatch, seen_urls: set[str] | None) -> tuple[AiVerdictBatch, dict]:
+    """Return the batch with bad citations removed, plus a report of what was
+    dropped: {"citations": n, "verdicts": [names], "successors": [names]}.
+
+    `seen_urls` None means the provider doesn't show what its searches
+    returned (the Claude CLI). Then only the presence rule applies: a
+    problem verdict with no citation at all is dropped. The first live eval
+    caught Haiku doing exactly that for 3 of 18 packages."""
+    seen = None if seen_urls is None else {normalize(u) for u in seen_urls if u}
     report = {"citations": 0, "verdicts": [], "successors": []}
     kept = []
     for v in batch.verdicts:
-        good = [s for s in v.sources if s.url and normalize(s.url) in seen]
+        good = [s for s in v.sources if s.url and (seen is None or normalize(s.url) in seen)]
         report["citations"] += len(v.sources) - len(good)
         v.sources = good
         if v.verdict not in (Verdict.supported, Verdict.unknown) and not good:

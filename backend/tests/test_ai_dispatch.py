@@ -140,8 +140,42 @@ def test_error_text_scrubs_keys():
 
 
 # --------------------------------------------------------------------------- #
-# CLI discovery, extraction fallback                                            #
+# CLI discovery, search counting, extraction fallback                           #
 # --------------------------------------------------------------------------- #
+async def test_cli_searches_are_counted_from_the_event_stream(monkeypatch):
+    """The CLI reports 0 in usage.server_tool_use even when it searched (seen
+    live: two WebSearch calls, web_search_requests=0)."""
+    import json as _json
+
+    events = [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "WebSearch", "input": {"query": "nose deprecated"}}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "WebSearch", "input": {"query": "nose eol"}},
+            {"type": "tool_use", "name": "WebFetch", "input": {"url": "https://x.example"}}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "{}"}]}},
+        {"type": "result", "is_error": False, "num_turns": 3, "total_cost_usd": 0.01,
+         "usage": {"input_tokens": 10, "output_tokens": 5,
+                   "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0}}},
+    ]
+    out = ("\n".join(_json.dumps(e) for e in events)).encode()
+
+    class Proc:
+        returncode = 0
+
+        async def communicate(self, input=None):
+            return out, b""
+
+    async def fake_exec(*cmd, **kw):
+        return Proc()
+
+    monkeypatch.setattr(transport, "resolve_cli_path", lambda: "claude")
+    monkeypatch.setattr(transport.asyncio, "create_subprocess_exec", fake_exec)
+    res = await transport._run_subprocess("p", cwd=None, allowed_tools=["WebSearch", "WebFetch"],
+                                          append_system=None, mcp_config=None, model="m",
+                                          add_dirs=None, timeout=10)
+    assert res.text == "{}"
+    assert (res.tokens()["web_search_requests"], res.tokens()["web_fetch_requests"]) == (2, 1)
 def test_the_newest_extension_cli_is_found_by_version(monkeypatch, tmp_path):
     _env(monkeypatch)
     monkeypatch.setattr(transport.shutil, "which", lambda name: None)

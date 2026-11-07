@@ -133,6 +133,17 @@ def test_citations_the_research_never_saw_are_dropped():
     assert report == {"citations": 2, "verdicts": ["ghost"], "successors": ["fine"]}
 
 
+def test_without_seen_urls_only_uncited_claims_are_dropped():
+    batch = AiVerdictBatch(verdicts=[
+        _verdict("nose", Verdict.deprecated, successor="pytest"),           # no citation at all
+        _verdict("cybox", Verdict.deprecated, "https://anything.example/"),  # cited: kept as is
+        _verdict("react", Verdict.supported),                                # supported needs none
+    ])
+    out, report = citations.enforce(batch, None)
+    assert [v.name for v in out.verdicts] == ["cybox", "react"]
+    assert report["verdicts"] == ["nose"]
+
+
 def test_url_normalization():
     assert citations.normalize("HTTP://Example.org/a/#x") == citations.normalize("https://example.org/a")
 
