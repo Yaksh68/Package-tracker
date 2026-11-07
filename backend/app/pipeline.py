@@ -458,15 +458,17 @@ def _record_run(
             flag_counts=dict(flag_counts),
             ai_status=ai.status,
             ai_detail=ai.detail or None,
-            ai_provider="claude-cli" if ran_ai else None,
-            ai_model=get_settings().agent_model if ran_ai else None,
+            ai_provider=ai.provider if ran_ai else None,
+            ai_model=ai.model if ran_ai else None,
             ai_batches=ai.batches,
             ai_failed_batches=ai.failed_batches,
             ai_tokens_in=sum(int(tokens.get(k) or 0) for k in (
                 "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")),
             ai_tokens_out=int(tokens.get("output_tokens") or 0),
             ai_searches=int(tokens.get("web_search_requests") or 0),
-            ai_cost_usd=tokens.get("cost_usd") if ran_ai else None,
+            # None = not estimated (a third-party model we don't price), never a guess
+            ai_cost_usd=(tokens.get("cost_usd") if ran_ai and not tokens.get("cost_unknown")
+                         else None),
             upstream_errors=dict(upstream_errors),
         ))
     except Exception:  # noqa: BLE001 - analytics must never break a scan

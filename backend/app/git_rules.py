@@ -107,8 +107,10 @@ def check_branch(branch: str) -> str:
 def require_public_address(host: str) -> None:
     """Raise RepoUrlError unless every address `host` resolves to is a public
     one. That excludes private, loopback, link-local, CGNAT and reserved
-    ranges, so a URL can't be used to reach internal services. The host
-    allowlist is the main control; this check is a second layer behind it."""
+    ranges, so a URL can't be used to reach internal services. For cloning,
+    the host allowlist is the main control and this is a second layer behind
+    it. The AI's fetch_url tool uses it too. Blocking: call it from a worker
+    thread inside async code."""
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as e:
@@ -118,6 +120,4 @@ def require_public_address(host: str) -> None:
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
         if not ip.is_global:
-            raise RepoUrlError(
-                f"{host} resolves to a non-public address ({ip}); cloning from it isn't allowed"
-            )
+            raise RepoUrlError(f"{host} resolves to a non-public address ({ip}), which isn't allowed")

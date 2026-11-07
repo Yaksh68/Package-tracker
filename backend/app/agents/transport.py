@@ -1,44 +1,46 @@
-"""Agent transport — one interface, two backends, same subscription auth.
+"""Agent transport: the one place that talks to a model.
 
-    backend = "subprocess"  -> spawn the Claude Code CLI with stream-json I/O
-                               (proven to work headless with subscription auth)
-    backend = "sdk"         -> claude_agent_sdk.query()
-    backend = "auto"        -> try sdk, fall back to subprocess on failure
+`run_text_agent` dispatches on the configured provider (see ai/config.py):
 
-Both drive the SAME `claude` binary and the SAME ~/.claude subscription login —
-no ANTHROPIC_API_KEY. This isolation is what lets us swap the AI layer later
-(e.g. to the raw Anthropic SDK) without touching storage/flags/API/UI.
+    claude-cli          -> the Claude Code CLI and the machine's own login
+                           (local mode only), through one of three backends:
+                           "subprocess" (stream-json I/O, the proven default),
+                           "sdk" (claude_agent_sdk.query()), or "auto" (try
+                           sdk, fall back to subprocess)
+    anthropic           -> ai.anthropic_provider (API key, server-side web search)
+    openai-compatible   -> ai.openai_compat (API key, web search the app runs)
+
+Every path returns the same AgentResult, so storage/flags/API/UI never know
+which provider ran. The API providers only research packages (web search and
+fetch); the AI extraction agent's file tools (Read/Glob/Grep) need the CLI.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import re
 import shutil
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import scanlog
+from ..ai import anthropic_provider, openai_compat
+from ..ai import config as ai_config
+from ..ai.errors import AiConfigError
+from ..ai.result import AgentResult, log_tool_result, log_tool_use, sum_tokens  # noqa: F401 - re-exported
 from ..config import get_settings
 
-
-def _truncate(v, n: int = 400) -> str:
-    s = v if isinstance(v, str) else json.dumps(v, default=str)
-    return s if len(s) <= n else s[:n] + "…"
+_RESEARCH_TOOLS = {"WebSearch", "WebFetch"}
 
 
 def _log_tool_use(block: dict) -> None:
-    name = block.get("name", "tool")
-    scanlog.emit("agent", f"tool → {name}", level="tool",
-                 data={"tool": name, "input": _truncate(block.get("input", {}))})
+    log_tool_use(block.get("name", "tool"), block.get("input", {}))
 
 
 def _log_tool_result(block: dict) -> None:
     content = block.get("content")
     if isinstance(content, list):
         content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-    scanlog.emit("agent", "tool result", level="result",
-                 data={"output": _truncate(content), "is_error": bool(block.get("is_error"))})
+    log_tool_result(content, is_error=bool(block.get("is_error")))
 
 
 def _is_root() -> bool:
@@ -50,54 +52,9 @@ class AgentError(RuntimeError):
     pass
 
 
-@dataclass
-class AgentResult:
-    text: str = ""
-    is_error: bool = False
-    error_message: str = ""
-    num_turns: int = 0
-    cost_usd: float = 0.0
-    # Token accounting straight off the result event. Both transports report the
-    # same shape (input_tokens / output_tokens / cache_* variants); `model_usage`
-    # breaks the same totals down per model when more than one was involved.
-    usage: dict = field(default_factory=dict)
-    model_usage: dict = field(default_factory=dict)
-    events: list[dict] = field(default_factory=list)
-
-    def tokens(self) -> dict:
-        """Flat token summary for the scan log. Cached input is kept separate
-        from fresh input: the two bill differently, so folding them into one
-        `input_tokens` number would misstate what the scan actually cost."""
-        u = self.usage or {}
-        fresh_in = int(u.get("input_tokens") or 0)
-        cache_read = int(u.get("cache_read_input_tokens") or 0)
-        cache_write = int(u.get("cache_creation_input_tokens") or 0)
-        out = int(u.get("output_tokens") or 0)
-        # Server-side tool calls are billed on their own meter and are what the
-        # enrichment agent actually spends most of its budget on, so they are
-        # counted here rather than left buried in the raw usage block.
-        srv = u.get("server_tool_use") or {}
-        return {
-            "input_tokens": fresh_in,
-            "cache_read_input_tokens": cache_read,
-            "cache_creation_input_tokens": cache_write,
-            "output_tokens": out,
-            "total_tokens": fresh_in + cache_read + cache_write + out,
-            "web_search_requests": int(srv.get("web_search_requests") or 0),
-            "web_fetch_requests": int(srv.get("web_fetch_requests") or 0),
-            "cost_usd": round(self.cost_usd, 6),
-            "num_turns": self.num_turns,
-        }
-
-
-def sum_tokens(totals: dict, one: dict) -> dict:
-    """Accumulate one `AgentResult.tokens()` into a running total."""
-    for k, v in one.items():
-        if k == "cost_usd":
-            totals[k] = round(totals.get(k, 0.0) + v, 6)
-        else:
-            totals[k] = totals.get(k, 0) + v
-    return totals
+def _extension_version(path: Path) -> tuple[int, ...]:
+    m = re.search(r"anthropic\.claude-code-(\d+(?:\.\d+)*)", str(path))
+    return tuple(int(x) for x in m.group(1).split(".")) if m else ()
 
 
 def resolve_cli_path() -> str:
@@ -108,17 +65,22 @@ def resolve_cli_path() -> str:
     found = shutil.which("claude")
     if found:
         return found
-    # VS Code extension bundled binary (most common on dev machines w/o CLI on PATH)
-    for pat in (
+    # The VS Code / Cursor extension's bundled binary: the most common case on
+    # dev machines without the CLI on PATH. It's `claude.exe` on Windows.
+    # Several versions are often installed side by side; take the newest by
+    # version number, not by string order (2.1.99 < 2.1.314).
+    names = ("claude.exe", "claude") if os.name == "nt" else ("claude",)
+    for base in (
         Path.home() / ".vscode-server/extensions",
         Path.home() / ".vscode/extensions",
         Path.home() / ".cursor-server/extensions",
         Path.home() / ".cursor/extensions",
     ):
-        if pat.exists():
-            hits = sorted(pat.glob("anthropic.claude-code-*/resources/native-binary/claude"))
+        if base.exists():
+            hits = [p for name in names
+                    for p in base.glob(f"anthropic.claude-code-*/resources/native-binary/{name}")]
             if hits:
-                return str(hits[-1])
+                return str(max(hits, key=_extension_version))
     raise AgentError(
         "Could not find the `claude` CLI. Install Claude Code and/or set "
         "CLAUDE_CLI_PATH in .env to the binary path."
@@ -274,18 +236,17 @@ async def _run_sdk(
     return result
 
 
-async def run_text_agent(
+async def _run_cli(
     prompt: str,
     *,
-    cwd: str | None = None,
-    allowed_tools: list[str] | None = None,
-    append_system: str | None = None,
-    mcp_config: str | None = None,
-    model: str | None = None,
-    add_dirs: list[str] | None = None,
-    timeout: float = 300.0,
+    cwd: str | None,
+    allowed_tools: list[str] | None,
+    append_system: str | None,
+    mcp_config: str | None,
+    model: str | None,
+    add_dirs: list[str] | None,
+    timeout: float,
 ) -> AgentResult:
-    """Run one agent conversation and return the final assistant text."""
     backend = get_settings().agent_backend
     if backend == "sdk":
         return await _run_sdk(
@@ -304,3 +265,37 @@ async def run_text_agent(
         prompt, cwd=cwd, allowed_tools=allowed_tools, append_system=append_system,
         mcp_config=mcp_config, model=model, add_dirs=add_dirs, timeout=timeout,
     )
+
+
+async def run_text_agent(
+    prompt: str,
+    *,
+    cwd: str | None = None,
+    allowed_tools: list[str] | None = None,
+    append_system: str | None = None,
+    mcp_config: str | None = None,
+    model: str | None = None,
+    add_dirs: list[str] | None = None,
+    timeout: float = 300.0,
+) -> AgentResult:
+    """Run one agent conversation with the configured provider and return the
+    final assistant text. Raises AiConfigError when no provider is usable."""
+    cfg, why = ai_config.resolve()
+    if cfg is None:
+        raise AiConfigError(why or "no AI provider is configured")
+    if cfg.provider == "claude-cli":
+        return await _run_cli(
+            prompt, cwd=cwd, allowed_tools=allowed_tools, append_system=append_system,
+            mcp_config=mcp_config, model=model or cfg.model, add_dirs=add_dirs, timeout=timeout,
+        )
+    if not set(allowed_tools or []) <= _RESEARCH_TOOLS:
+        raise AiConfigError(
+            f"{cfg.label} can only research packages; the AI extraction agent needs the Claude CLI"
+        )
+    max_searches = get_settings().web_search_max_uses
+    system = append_system or ""
+    if cfg.provider == "anthropic":
+        return await anthropic_provider.research(cfg, prompt, system,
+                                                 max_searches=max_searches, timeout=timeout)
+    return await openai_compat.research(cfg, prompt, system,
+                                        max_searches=max_searches, timeout=timeout)

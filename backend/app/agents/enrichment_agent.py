@@ -33,6 +33,9 @@ from ..models import (
     Source,
     Verdict,
 )
+from ..ai import citations
+from ..ai import config as ai_config
+from ..ai.errors import AiError, redact_keys
 from . import apt_index, source_apis
 from .transport import run_text_agent, sum_tokens
 
@@ -55,6 +58,8 @@ class AiOutcome:
     skipped_batches: int = 0
     seconds: float = 0.0
     tokens: dict = field(default_factory=dict)
+    provider: str | None = None  # AiConfig.label, e.g. "anthropic", "openai-compatible:groq"
+    model: str | None = None
 
 
 def _stale(last: date | None, years: int) -> bool:
@@ -444,13 +449,20 @@ async def enrich(
     # missing, a batch timing out) escaped enrich() and the pipeline flagged
     # every package UNKNOWN.
     if settings_store.get_runtime_settings().get("use_enrichment_agent"):
-        try:
-            await _ai_pass(list(results.values()), today=today, outcome=outcome)
-        except Exception as ex:  # noqa: BLE001 - AI is optional; keep the structured verdicts
-            outcome.status = "failed"
-            outcome.detail = _error_text(ex)
-            scanlog.emit("agent", f"AI research failed, structured verdicts kept: {outcome.detail}",
-                         level="warn")
+        cfg, why = ai_config.resolve()
+        if cfg is None:
+            # AI is on but nothing can run it (no key, no provider): skip it.
+            outcome.status, outcome.detail = "no_key", why or "no AI provider is configured"
+            scanlog.emit("enrich", f"AI research skipped: {outcome.detail}", level="warn")
+        else:
+            outcome.provider, outcome.model = cfg.label, cfg.model
+            try:
+                await _ai_pass(list(results.values()), today=today, outcome=outcome)
+            except Exception as ex:  # noqa: BLE001 - AI is optional; keep the structured verdicts
+                outcome.status = "failed"
+                outcome.detail = _error_text(ex)
+                scanlog.emit("agent", f"AI research failed, structured verdicts kept: {outcome.detail}",
+                             level="warn")
     else:
         outcome.status = "off"
 
@@ -559,8 +571,13 @@ def _merge_ai(e: Enrichment, v) -> None:
 
 
 def _error_text(ex: BaseException) -> str:
-    text = f"{type(ex).__name__}: {ex}" if str(ex) else type(ex).__name__
+    text = redact_keys(f"{type(ex).__name__}: {ex}" if str(ex) else type(ex).__name__)
     return text if len(text) <= 300 else text[:300] + "…"
+
+
+def _exception_kind(ex: BaseException) -> str:
+    # The providers raise typed errors; the CLI raises AgentError with a message.
+    return ex.kind if isinstance(ex, AiError) else _classify(_error_text(ex))
 
 
 # What a failed batch's error says about the next one. Rejected credentials,
@@ -615,10 +632,13 @@ def _outcome_status(total: int, failures: list[str], skipped: int, stopped: str 
 
 
 async def _run_ai_batch(
-    batch: list[Enrichment], *, max_searches: int, errors: list[str] | None = None,
+    batch: list[Enrichment], *, max_searches: int, errors: list[tuple[str, str]] | None = None,
 ) -> tuple[AiVerdictBatch | None, dict]:
     """Return the parsed verdicts (or None) and the tokens this batch spent.
-    Never raises: why a batch failed is appended to `errors`.
+    Never raises: why a batch failed is appended to `errors` as (kind, message).
+
+    When the provider reports which URLs its searches returned, the citation
+    check drops sources the model never saw (see ai/citations.py).
 
     A retry after malformed output is charged into the same total: the tokens
     were spent whether or not the second attempt parsed."""
@@ -639,20 +659,34 @@ async def _run_ai_batch(
         except Exception as ex:  # noqa: BLE001 - the caller keeps the structured verdicts
             # No retry: a timeout or a missing CLI won't fix itself, and a
             # retried timeout would double the wait.
-            errors.append(_error_text(ex))
+            errors.append((_exception_kind(ex), _error_text(ex)))
             return None, spent
         sum_tokens(spent, res.tokens())
         if res.is_error:
-            errors.append(res.error_message or "agent error")
-            scanlog.emit("agent", f"AI enrichment batch error: {res.error_message}", level="warn")
-            if _classify(errors[-1]) in _STOP_KINDS:
+            message = redact_keys(res.error_message or "agent error")
+            errors.append((_classify(message), message))
+            scanlog.emit("agent", f"AI enrichment batch error: {message}", level="warn")
+            if errors[-1][0] in _STOP_KINDS:
                 return None, spent  # a rejected key or exhausted quota fails again
             continue
         try:
-            return AiVerdictBatch(**_extract_json(res.text)), spent
+            parsed = AiVerdictBatch(**_extract_json(res.text))
         except Exception as ex:  # noqa: BLE001 - malformed → retry then degrade
-            errors.append(f"invalid output: {ex}")
+            errors.append(("invalid", f"invalid output: {ex}"))
             scanlog.emit("agent", f"AI batch output invalid ({ex}); retrying", level="warn")
+            continue
+        seen = getattr(res, "seen_urls", None)
+        if seen is not None:
+            parsed, dropped = citations.enforce(parsed, seen)
+            if dropped["citations"] or dropped["verdicts"] or dropped["successors"]:
+                scanlog.emit(
+                    "agent",
+                    f"Citation check: dropped {dropped['citations']} citation(s) the research "
+                    f"never saw; {len(dropped['verdicts'])} unbacked verdict(s) kept their "
+                    "structured result",
+                    level="warn", data=dropped,
+                )
+        return parsed, spent
     return None, spent
 
 
@@ -690,7 +724,7 @@ async def _ai_pass(
     stopped: str | None = None
     for i, batch in enumerate(batches, start=1):
         attempted += 1
-        errors: list[str] = []
+        errors: list[tuple[str, str]] = []
         result, spent = await _run_ai_batch(
             batch, max_searches=settings.web_search_max_uses, errors=errors,
         )
@@ -703,13 +737,13 @@ async def _ai_pass(
             data=spent,
         )
         if result is None:
-            kind = _classify(errors[-1]) if errors else "invalid"
+            kind, message = errors[-1] if errors else ("invalid", None)
             failures.append(kind)
             scanlog.emit(
                 "agent",
                 f"AI batch {i}/{len(batches)} failed ({_KIND_TEXT[kind]}) → keeping structured verdicts",
                 level="warn",
-                data={"kind": kind, "error": errors[-1] if errors else None},
+                data={"kind": kind, "error": message},
             )
             if kind in _STOP_KINDS:
                 stopped = kind
