@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, errorMessage, isNotFound } from "../api";
 import { fmtDate, fmtDateTime, fmtRelative } from "../format";
+import { AiStatusTag } from "../components/AiStatusTag";
 import { CitationsDrawer } from "../components/CitationsDrawer";
 import { ComponentTable } from "../components/ComponentTable";
 import { ScanIssueAlert } from "../components/ScanIssueAlert";
@@ -72,6 +73,7 @@ export function RepoDetail() {
   // Switching branches drops a snapshot picked on the old one.
   useEffect(() => setPinnedTs(undefined), [branch]);
   const ts = pinnedTs && snapshots.some((s) => s.ts === pinnedTs) ? pinnedTs : snapshots[0]?.ts;
+  const currentSnapshot = snapshots.find((s) => s.ts === ts);
 
   const { data: components = [], isLoading } = useQuery({
     queryKey: ["components", id, branch, ts],
@@ -139,6 +141,7 @@ export function RepoDetail() {
           <ScanStatusPill state={status?.state} phase={status?.phase} />
         </Space>
         <Space>
+          <AiStatusTag status={currentSnapshot?.ai_status} detail={currentSnapshot?.ai_detail} />
           <SnapshotPicker
             snapshots={snapshots}
             value={ts}

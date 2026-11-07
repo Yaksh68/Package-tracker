@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .git_rules import check_branch, check_repo_url
+
 
 # --------------------------------------------------------------------------- #
 # Extraction (Agent 1 output contract)                                        #
@@ -302,10 +304,21 @@ class RepoCreate(BaseModel):
     ignored_packages: list[str] = Field(default_factory=list)
     id: str | None = None  # server derives from url if omitted
 
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        return check_repo_url(v)  # RepoUrlError is a ValueError → 422
+
     @field_validator("branches", mode="before")
     @classmethod
     def _clean_branches(cls, v) -> list[str]:
         return clean_branches(v)
+
+    @field_validator("branches")
+    @classmethod
+    def _check_branches(cls, v: list[str]) -> list[str]:
+        # git repos only: upload "branches" are free-form version labels
+        return [check_branch(b) for b in v]
 
     @field_validator("image_tags", mode="before")
     @classmethod
@@ -378,6 +391,12 @@ class SnapshotSummary(BaseModel):
     package_count: int = 0
     flag_counts: dict[str, int] = Field(default_factory=dict)
     degraded: bool = False
+    # How the optional AI research pass went: off | ok | partial | failed |
+    # quota | no_key (see enrichment_agent.AiOutcome). Kept apart from
+    # `degraded` on purpose: an AI problem leaves the structured data complete.
+    # None for snapshots written before this existed.
+    ai_status: str | None = None
+    ai_detail: str | None = None
 
 
 class ScanState(str, Enum):
@@ -427,3 +446,37 @@ class ScanLog(BaseModel):
     snapshot_ts: str | None = None
     state: ScanState = ScanState.idle
     entries: list[LogEntry] = Field(default_factory=list)
+
+
+class ScanRunRecord(BaseModel):
+    """The facts of one scan attempt (a `scan_runs` row), kept for analytics.
+    Written for every scan, including failed ones."""
+    repo_id: str
+    workspace_id: str | None = None
+    branch: str
+    snapshot_ts: str | None = None  # None when the scan never produced a listed snapshot
+    triggered_by: str = "manual"    # scheduled | manual | initial | upload
+    queued_at: datetime | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    outcome: Literal["done", "degraded", "error"]
+    # wall-clock seconds per stage: clone, extract, inspect, enrich (which
+    # includes ai), ai, flag, snapshot
+    stage_seconds: dict[str, float] = Field(default_factory=dict)
+    issue_stages: list[str] = Field(default_factory=list)
+    first_error: str | None = None
+    package_count: int = 0
+    package_counts: dict[str, int] = Field(default_factory=dict)  # by ecosystem
+    flag_counts: dict[str, int] = Field(default_factory=dict)
+    ai_status: str | None = None
+    ai_detail: str | None = None
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    ai_batches: int = 0
+    ai_failed_batches: int = 0
+    ai_tokens_in: int = 0   # fresh + cache-read + cache-write input tokens
+    ai_tokens_out: int = 0
+    ai_searches: int = 0
+    ai_cost_usd: float | None = None
+    # failed outside lookups by "host:kind", e.g. {"api.github.com:rate_limited": 3}
+    upstream_errors: dict[str, int] = Field(default_factory=dict)

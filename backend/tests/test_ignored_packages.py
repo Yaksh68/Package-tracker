@@ -52,7 +52,7 @@ def test_repo_cleans_the_list():
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setattr(scheduler, "trigger_now", lambda repo, branch: None)
+    monkeypatch.setattr(scheduler, "trigger_now", lambda repo, branch, **kw: None)
     return TestClient(app)
 
 

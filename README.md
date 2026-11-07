@@ -105,6 +105,10 @@ branch, planned release date, and interval. The first scan starts immediately.
 
 | Var | Purpose |
 |---|---|
+| `AUTH_MODE` | `none` (default: no login, one local user) or `github` (public mode; for now it only tightens the clone and Docker rules, and sign-in comes later) |
+| `GIT_HOST_ALLOWLIST` | Comma-separated hosts repos may be cloned from (`*.example.com` = subdomains). Empty = any host in the local mode; the public mode defaults to github.com, gitlab.com, bitbucket.org, codeberg.org |
+| `CLONE_TIMEOUT_SECONDS` | Kill a clone that runs longer than this (default 120) |
+| `IMAGE_INSPECT` | Docker image inventory: `auto` (default: use Docker when it's there, otherwise skip without degrading the scan), `on`, or `off`. Always off in the public mode |
 | `GITLAB_TOKEN` / `GITHUB_TOKEN` | Repo read PATs; injected into the clone URL at runtime, never stored in snapshots or logs |
 | `GITHUB_API_TOKEN` | Optional; raises GitHub API rate limit for enrichment (falls back to `GITHUB_TOKEN`) |
 | `CLAUDE_CLI_PATH` | Path to the `claude` binary if not on PATH |

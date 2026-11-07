@@ -76,11 +76,18 @@ export interface RepoUpdate {
   ignored_packages?: string[];
 }
 
+/** How a snapshot's optional AI research pass went. Separate from `degraded`:
+ *  an AI problem leaves the scan's own results complete. */
+export type AiStatus = "off" | "ok" | "partial" | "failed" | "quota" | "no_key";
+
 export interface SnapshotSummary {
   ts: string;
   package_count: number;
   flag_counts: Record<string, number>;
   degraded: boolean;
+  /** null for snapshots written before this was recorded */
+  ai_status?: AiStatus | null;
+  ai_detail?: string | null;
 }
 
 export interface CitationSource {

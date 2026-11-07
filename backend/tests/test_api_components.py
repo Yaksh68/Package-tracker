@@ -12,7 +12,7 @@ TS = "2026-07-20T10-00-00Z"
 
 @pytest.fixture(autouse=True)
 def _no_real_scans(monkeypatch):
-    monkeypatch.setattr(scheduler, "trigger_now", lambda repo, branch: None)
+    monkeypatch.setattr(scheduler, "trigger_now", lambda repo, branch, **kw: None)
 
 
 @pytest.fixture

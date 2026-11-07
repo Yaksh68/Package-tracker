@@ -26,6 +26,7 @@ from .db_models import (
     RepoBranchRow,
     RepoRow,
     ScanLogRow,
+    ScanRunRow,
     SnapshotRow,
 )
 from .models import (
@@ -33,6 +34,7 @@ from .models import (
     Flag,
     Package,
     Repo,
+    ScanRunRecord,
     SnapshotSummary,
 )
 
@@ -196,7 +198,8 @@ def _snapshot(s: Session, repo_id: str, branch: str, ts: str, *, create: bool) -
 
 def _summary(row: SnapshotRow) -> SnapshotSummary:
     return SnapshotSummary(ts=row.ts, package_count=row.package_count,
-                           flag_counts=row.flag_counts or {}, degraded=row.degraded)
+                           flag_counts=row.flag_counts or {}, degraded=row.degraded,
+                           ai_status=row.ai_status, ai_detail=row.ai_detail)
 
 
 def _apply_summary(row: SnapshotRow, summary: SnapshotSummary) -> None:
@@ -204,6 +207,8 @@ def _apply_summary(row: SnapshotRow, summary: SnapshotSummary) -> None:
     row.package_count = summary.package_count
     row.flag_counts = dict(summary.flag_counts)
     row.degraded = summary.degraded
+    row.ai_status = summary.ai_status
+    row.ai_detail = summary.ai_detail
 
 
 def load_index(repo_id: str, branch: str) -> list[SnapshotSummary]:
@@ -246,6 +251,22 @@ def latest_snapshot_ts(repo_id: str, branch: str) -> str | None:
 # A write replaces that payload wholesale (re-flagging rewrites flags), and
 # creates the snapshot row if this is the scan's first write — the pipeline
 # writes payloads before it lists the snapshot in the index.
+def write_scan_run(run: ScanRunRecord) -> None:
+    """Record one finished scan attempt: the analytics fact row."""
+    with session() as s:
+        s.add(ScanRunRow(**_strip_nul(run.model_dump())))
+
+
+def list_scan_runs(repo_id: str | None = None, *, limit: int = 100) -> list[ScanRunRecord]:
+    """Recorded scan attempts, newest first, optionally for one repo."""
+    with session() as s:
+        q = select(ScanRunRow).order_by(ScanRunRow.started_at.desc(), ScanRunRow.id.desc())
+        if repo_id is not None:
+            q = q.where(ScanRunRow.repo_id == repo_id)
+        rows = s.scalars(q.limit(limit)).all()
+        return [ScanRunRecord.model_validate(r, from_attributes=True) for r in rows]
+
+
 def _strip_nul(v):
     """Postgres text/JSONB reject NUL characters, which upstream metadata (an npm
     deprecation message, a scraped summary) can contain. Files stored them; a

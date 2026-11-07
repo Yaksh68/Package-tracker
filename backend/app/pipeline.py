@@ -9,10 +9,11 @@ tracks state independently.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 
-from . import flags, scanlog, storage, uploads
+from . import flags, scanlog, settings_store, storage, uploads
 from .agents import apt_index, enrichment_agent, extraction_agent, image_inspect, source_apis
 from .agents.clone import CloneError, shallow_clone
 from .agents.image_inspect import ImageInspectError
@@ -22,6 +23,7 @@ from .models import (
     Package,
     Repo,
     ScanIssue,
+    ScanRunRecord,
     ScanState,
     ScanStatus,
     SnapshotSummary,
@@ -34,6 +36,10 @@ def _now() -> float:
 
 def _since(t0: float) -> str:
     return f"{time.monotonic() - t0:.1f}"
+
+
+def _secs(t0: float) -> float:
+    return round(time.monotonic() - t0, 2)
 
 
 def _extract_summary(packages: list[Package]) -> dict:
@@ -104,8 +110,14 @@ def is_scanning(repo_id: str, branch: str) -> bool:
 
 
 async def run_scan(
-    repo: Repo, branch: str, *, use_extraction_agent: bool | None = None
+    repo: Repo,
+    branch: str,
+    *,
+    use_extraction_agent: bool | None = None,
+    trigger: str = "manual",
 ) -> ScanStatus:
+    """Scan one branch. `trigger` says why it ran: scheduled, manual, initial
+    (first scan after the repo was added) or upload."""
     lock = _lock(repo.id, branch)
     if lock.locked():
         return get_status(repo.id, branch)  # overlap guard: skip if already running
@@ -137,6 +149,13 @@ async def run_scan(
         # per-Dockerfile base image + added apt repos, read while the clone exists
         docker_ctx = image_inspect.DockerfileContext()
         apt_indexes: dict[str, apt_index.AptIndex] = {}
+        # how the optional AI research went; reported apart from `degraded`
+        ai = enrichment_agent.AiOutcome()
+        # facts for this scan's `scan_runs` row (see _record_run)
+        started_at = datetime.now(timezone.utc)
+        stage_seconds: dict[str, float] = {}
+        counts: dict[str, int] = {}
+        upstream_errors = source_apis.start_error_tally()
 
         def _phase(name: str) -> None:
             _set(repo.id, branch, phase=name)
@@ -159,6 +178,7 @@ async def run_scan(
                     )
                     done_msg = f"Cloned {branch} in {_since(t0)}s"
                 try:
+                    stage_seconds["clone"] = _secs(t0)
                     log.emit("clone", done_msg, data={"path": str(clone.path)})
                     _phase("extract")
                     t1 = _now()
@@ -167,6 +187,7 @@ async def run_scan(
                         clone.path, use_agent=bool(use_agent), tag_vars=tag_vars
                     )
                     packages = pkg_list.packages
+                    stage_seconds["extract"] = _secs(t1)
                     log.emit("extract",
                              f"Extracted {len(packages)} packages in {_since(t1)}s",
                              data=_extract_summary(packages))
@@ -204,12 +225,24 @@ async def run_scan(
                 finally:
                     await asyncio.to_thread(clone.cleanup)
             except CloneError as e:
+                stage_seconds.setdefault("clone", _secs(t0))
                 degraded = True
                 _fail(repo.id, branch, "clone", str(e))
                 log.emit("clone", str(e), level="error")
 
+            # Docker is a capability (image_inspect.inspect_mode). Without it, the
+            # two Docker steps below are skipped and the scan isn't degraded.
+            t_inspect = _now()
+            docker_on, docker_why = await asyncio.to_thread(image_inspect.inspect_mode)
+
             # 2b. OS-package inventory of the detected Docker image(s) (dpkg parity)
-            if images_to_inspect:
+            if images_to_inspect and not docker_on:
+                log.emit("inspect",
+                         f"Skipped the OS-package inventory of {len(images_to_inspect)} "
+                         f"Docker image(s): {docker_why}. Base-image EOL and Dockerfile "
+                         "apt packages are still checked.",
+                         data={"images": images_to_inspect, "reason": docker_why})
+            elif images_to_inspect:
                 _phase("inspect")
                 for image in images_to_inspect:
                     t_img = _now()
@@ -272,7 +305,13 @@ async def run_scan(
 
             # 2d. Whatever is still unpinned (non-Ubuntu bases, index offline):
             # ask each base image's own apt what it would install.
-            if any(p.ecosystem.value == "apt" and not p.version for p in packages):
+            unpinned = sum(1 for p in packages if p.ecosystem.value == "apt" and not p.version)
+            if unpinned and not docker_on:
+                log.emit("inspect",
+                         f"{unpinned} apt package(s) stay without a version: asking the base "
+                         f"image needs Docker, and {docker_why}",
+                         data={"unpinned": unpinned, "reason": docker_why})
+            elif unpinned:
                 _phase("inspect")
                 t_res = _now()
                 try:
@@ -298,6 +337,7 @@ async def run_scan(
                     degraded = True
                     _fail(repo.id, branch, "inspect", f"apt version resolution degraded: {e}")
                     log.emit("inspect", f"apt version resolution degraded: {e}", level="error")
+            stage_seconds["inspect"] = _secs(t_inspect)
 
             # 3. enrich
             if packages:
@@ -306,6 +346,7 @@ async def run_scan(
                 try:
                     enrichments = await enrichment_agent.enrich(
                         packages, distro_by_source=distro_by_source, apt_indexes=apt_indexes,
+                        ai_outcome=ai,
                     )
                     log.emit("enrich",
                              f"Enriched {len(enrichments)} packages in {_since(t2)}s",
@@ -314,25 +355,35 @@ async def run_scan(
                     degraded = True
                     _fail(repo.id, branch, "enrich", f"enrichment degraded: {e}")
                     log.emit("enrich", f"enrichment degraded: {e}", level="error")
+                stage_seconds["enrich"] = _secs(t2)  # includes the AI pass
+                if ai.batches:
+                    stage_seconds["ai"] = ai.seconds
+            elif settings_store.get_runtime_settings().get("use_enrichment_agent"):
+                ai.status, ai.detail = "ok", "no packages to research"
 
             # 4. flag
             _phase("flag")
+            t_flag = _now()
             enrich_by_key = {e.key: e for e in enrichments}
             flag_list = flags.evaluate_all(packages, enrich_by_key, repo.release_date,
                                            repo.ignored_packages)
             counts = flags.count_flags(flag_list)
+            stage_seconds["flag"] = _secs(t_flag)
             log.emit("flag", f"Flagged {len(flag_list)} packages", data={"counts": counts})
 
             # 5. snapshot (each payload is one DB transaction; the snapshot is
             #    only listed once the index entry below commits)
             _phase("snapshot")
+            t_snap = _now()
             storage.write_packages(repo.id, branch, ts, packages)
             storage.write_enrichment(repo.id, branch, ts, enrichments)
             storage.write_flags(repo.id, branch, ts, flag_list)
             summary = SnapshotSummary(
                 ts=ts, package_count=len(packages), flag_counts=counts, degraded=degraded,
+                ai_status=ai.status, ai_detail=ai.detail or None,
             )
             storage.upsert_index_entry(repo.id, branch, summary)
+            stage_seconds["snapshot"] = _secs(t_snap)
             log.emit("snapshot", f"Wrote snapshot {ts}"
                      + (" (degraded)" if degraded else ""),
                      data={"stored": ["packages", "enrichment", "flags"]})
@@ -362,5 +413,62 @@ async def run_scan(
                 storage.write_scan_log(repo.id, branch, ts, log.to_model())
             except Exception:  # noqa: BLE001
                 pass
+            _record_run(
+                repo, branch, ts, trigger=trigger, started_at=started_at,
+                stage_seconds=stage_seconds, packages=packages, flag_counts=counts,
+                ai=ai, upstream_errors=upstream_errors,
+            )
 
         return get_status(repo.id, branch)
+
+
+def _record_run(
+    repo: Repo,
+    branch: str,
+    ts: str,
+    *,
+    trigger: str,
+    started_at: datetime,
+    stage_seconds: dict[str, float],
+    packages: list[Package],
+    flag_counts: dict[str, int],
+    ai: enrichment_agent.AiOutcome,
+    upstream_errors: dict[str, int],
+) -> None:
+    """Write this scan's `scan_runs` fact row. Analytics must never break a
+    scan, so a failure here is only logged."""
+    try:
+        st = get_status(repo.id, branch)
+        outcome = "error" if st.state == ScanState.error else ("degraded" if st.degraded else "done")
+        tokens = ai.tokens or {}
+        ran_ai = ai.batches > 0
+        storage.write_scan_run(ScanRunRecord(
+            repo_id=repo.id,
+            branch=branch,
+            snapshot_ts=None if outcome == "error" else ts,
+            triggered_by=trigger,
+            started_at=started_at,
+            finished_at=st.finished_at or datetime.now(timezone.utc),
+            outcome=outcome,
+            stage_seconds=stage_seconds,
+            issue_stages=list(dict.fromkeys(i.stage for i in st.issues)),
+            first_error=st.issues[0].message[:500] if st.issues else None,
+            package_count=len(packages),
+            package_counts=_extract_summary(packages)["by_ecosystem"],
+            flag_counts=dict(flag_counts),
+            ai_status=ai.status,
+            ai_detail=ai.detail or None,
+            ai_provider="claude-cli" if ran_ai else None,
+            ai_model=get_settings().agent_model if ran_ai else None,
+            ai_batches=ai.batches,
+            ai_failed_batches=ai.failed_batches,
+            ai_tokens_in=sum(int(tokens.get(k) or 0) for k in (
+                "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")),
+            ai_tokens_out=int(tokens.get("output_tokens") or 0),
+            ai_searches=int(tokens.get("web_search_requests") or 0),
+            ai_cost_usd=tokens.get("cost_usd") if ran_ai else None,
+            upstream_errors=dict(upstream_errors),
+        ))
+    except Exception:  # noqa: BLE001 - analytics must never break a scan
+        logging.getLogger("packages-tracker.pipeline").exception(
+            "could not record the scan run for %s @ %s", repo.id, branch)

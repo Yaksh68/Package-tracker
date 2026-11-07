@@ -6,6 +6,9 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Where public-mode repos may be cloned from when GIT_HOST_ALLOWLIST is unset.
+DEFAULT_PUBLIC_GIT_HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -13,6 +16,23 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # "none": no login, one local user (today's behaviour). "github": the public
+    # multi-user mode. Sign-in arrives in a later phase; until then this only
+    # tightens the clone and Docker rules (see public_mode()).
+    auth_mode: str = "none"
+
+    # Hosts repos may be cloned from, comma-separated; "*.example.com" allows
+    # that domain's subdomains. Empty = any host, but only when auth_mode is
+    # "none"; the public mode falls back to DEFAULT_PUBLIC_GIT_HOSTS.
+    git_host_allowlist: str = ""
+    # A clone running longer than this is killed.
+    clone_timeout_seconds: int = 120
+
+    # Docker image inventory: "auto" (use Docker when it's there, else skip
+    # quietly), "on" (always try; a missing Docker degrades the scan) or "off".
+    # Always off in the public mode, where it would run images users choose.
+    image_inspect: str = "auto"
 
     # Repo-access PATs. Injected into clone URLs at runtime, never persisted.
     gitlab_token: str | None = None
@@ -75,6 +95,21 @@ class Settings(BaseSettings):
     @property
     def data_dir(self) -> Path:
         return self.eol_data_dir
+
+    def public_mode(self) -> bool:
+        """True when the service is open to the public (auth_mode "github"):
+        stricter clone rules, no Docker image inventory."""
+        return (self.auth_mode or "none").strip().lower() == "github"
+
+    def git_hosts(self) -> tuple[str, ...]:
+        """The effective clone allowlist (lower-case). Empty means any host,
+        which only the local mode allows."""
+        hosts = tuple(
+            h.strip().lower() for h in (self.git_host_allowlist or "").split(",") if h.strip()
+        )
+        if not hosts and self.public_mode():
+            return DEFAULT_PUBLIC_GIT_HOSTS
+        return hosts
 
     def github_read_token(self) -> str | None:
         return self.github_api_token or self.github_token

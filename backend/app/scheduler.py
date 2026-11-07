@@ -61,7 +61,7 @@ async def _scan_job(repo_id: str, branch: str) -> None:
     if repo.source == "upload" and not uploads.has_upload(repo_id, branch):
         return  # nothing to scan until a zip is uploaded for this version
     log.info("scheduled scan starting for %s @ %s", repo_id, branch)
-    await run_scan(repo, branch)
+    await run_scan(repo, branch, trigger="scheduled")
 
 
 def start() -> AsyncIOScheduler:
@@ -163,6 +163,7 @@ def sync_all() -> None:
             pass
 
 
-def trigger_now(repo: Repo, branch: str) -> None:
-    """Fire a scan in the background without waiting (used by POST /scan)."""
-    asyncio.create_task(run_scan(repo, branch))
+def trigger_now(repo: Repo, branch: str, *, trigger: str = "manual") -> None:
+    """Fire a scan in the background without waiting. `trigger` records why it
+    ran (manual / initial / upload) on the scan's `scan_runs` row."""
+    asyncio.create_task(run_scan(repo, branch, trigger=trigger))

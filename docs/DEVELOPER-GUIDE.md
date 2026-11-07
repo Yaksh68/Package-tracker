@@ -157,7 +157,9 @@ packages-tracker/
   `snapshots` (unique `(repo_id, branch, ts)`; no FK to `repos`), `packages`,
   `enrichments` (whole `Enrichment` in `data`, so new model fields need no
   migration; scalar copies indexed for querying), `flags`, `scan_logs`,
-  `app_settings`.
+  `app_settings`, `scan_runs` (one fact row per scan attempt, failed ones
+  included, for the admin analytics; no FK to `repos`, so usage history outlives
+  a deleted repo).
 - `position` columns preserve list order exactly as the scan produced it.
   Package keys are **not unique per snapshot** (one package pinned in two
   manifests = two rows with the same key), so nothing is keyed on them.
@@ -245,12 +247,27 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   branch, or every branch on delete), `_set`, `_lock`, `is_scanning`.
 - Helpers: `_now`/`_since` (timings), `_extract_summary` (by-ecosystem/by-file),
   `_enrich_summary` (by-verdict).
-- **`run_scan(repo, branch, *, use_extraction_agent=None)`** — the core: overlap
+- **`run_scan(repo, branch, *, use_extraction_agent=None, trigger="manual")`** — the core: overlap
   guard on `(repo.id, branch)` → binds a `ScanLogger` → clone `branch` → extract →
   enrich → flag → write snapshot + index (all under `branch`'s slug) → touch
   `repo.last_scan_by_branch[branch]`. Emits scanlog events at each
-  stage; persists the scan log in a `finally`. Catches everything; degrades,
-  never raises.
+  stage. Catches everything; degrades, never raises.
+- **AI is optional.** `enrich()` fills in an `enrichment_agent.AiOutcome`. Its
+  status is `off`, `ok`, `partial`, `failed`, `quota` or `no_key`, and it's
+  stored on the snapshot as `ai_status` / `ai_detail`.
+  - A failed AI batch never raises. Its packages keep their structured verdicts,
+    and the snapshot is **not** marked degraded.
+  - The pass stops early on errors that would fail every remaining batch: a
+    rejected key, an exhausted quota or a missing CLI.
+- In its `finally`, the scan persists the scan log and writes one `scan_runs`
+  row (`_record_run`):
+  - why it ran (`trigger`) and the outcome (`done` / `degraded` / `error`);
+  - seconds per stage, the stages with issues and the first error;
+  - package and flag counts;
+  - AI usage;
+  - failed outside lookups, from `source_apis.start_error_tally()`.
+
+  A failed write of that row is only logged.
 
 ### `scheduler.py` (APScheduler, in FastAPI lifespan)
 - `start`/`shutdown`; `_scan_job(repo_id, branch)` → `run_scan`.
@@ -289,11 +306,30 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   stored — it's a pure function of two already-persisted values, so existing
   snapshots gain it with no re-scan (same spirit as `_reflag_latest`).
 
-### `agents/clone.py`
-- `shallow_clone(url, branch, token_override)` → `Clone` context manager
-  (`git clone --depth 1 --single-branch --branch`). `_token_for` picks the token by
-  URL host; `_auth_url` injects it (`oauth2:<t>@` for GitLab, `<t>@` for GitHub);
-  `_redact` scrubs tokens/userinfo from errors. `CloneError` on failure.
+### `agents/clone.py` and `git_rules.py` (user input that reaches git)
+- `shallow_clone(url, branch, token_override)` returns a `Clone` context manager
+  (`git clone --depth 1 --single-branch --branch <b> -- <url> <dest>`).
+  `_token_for` picks the token by URL host; `_auth_url` injects it (`oauth2:<t>@`
+  for GitLab, `<t>@` for GitHub); `_redact` scrubs tokens and userinfo from
+  errors. Raises `CloneError` on failure.
+- `git_rules.check_repo_url` / `check_branch` run before git sees either value,
+  both in `RepoCreate`/PUT (a 422) and again at clone time. They reject:
+  - option-like or control characters;
+  - anything but http(s), or https only in the public mode;
+  - credentials in the URL;
+  - hosts not on `GIT_HOST_ALLOWLIST` (with an empty allowlist, the local mode
+    accepts any host);
+  - IP-address hosts, in the public mode;
+  - names git's ref-name rules forbid.
+- Git always runs with `GIT_ALLOW_PROTOCOL` (http:https, or https only in the
+  public mode), `GIT_TERMINAL_PROMPT=0` and a `CLONE_TIMEOUT_SECONDS` timeout.
+- In the public mode (`AUTH_MODE=github`), `require_public_address` also refuses
+  hosts that resolve to private, loopback, link-local or CGNAT addresses, and git
+  gets `-c http.followRedirects=false`. Without these rules, a "URL" like
+  `--upload-pack=<cmd>` ran a command, and `file:///…` copied server files into a
+  scan.
+- Upload repos never clone. Their "branches" are free-form version labels, so
+  the branch rules apply to git repos only.
 
 ### `agents/parsers.py` (deterministic — run first, cover the common formats)
 - `parse_requirements` (pinned `==` and unpinned names), `parse_package_json`
@@ -346,6 +382,17 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
 - The pipeline calls `detect_images` inside the clone `with`-block (needs files
   on disk), then inventories each detected image after. `repo.inspect_image`
   remains a manual override (API-only) that short-circuits auto-detection.
+- **Docker is a capability, not a requirement.** `inspect_mode()` returns
+  `(enabled, reason)` from `IMAGE_INSPECT`:
+  - `auto`, the default, uses Docker when `docker version` answers
+    (`docker_available()`, cached for 10 minutes);
+  - `on` always tries, so a missing Docker degrades the scan;
+  - `off` never uses Docker;
+  - the public mode is always off.
+- When Docker is off, the pipeline skips the image inventory and the Docker-based
+  apt-version fallback, logs a line saying why, and does **not** mark the scan
+  degraded. Base-image EOL and Dockerfile apt packages still come from the
+  HTTP-only apt-index path.
 
 ### `agents/source_apis.py` (deterministic httpx lookups)
 - `query_endoflife(client, name, version)` — resolves the product slug
@@ -489,6 +536,28 @@ Dev server proxies `/api` → backend (`VITE_API_TARGET`, default `:8000`).
 ```bash
 cd backend && . .venv/bin/activate && pytest
 ```
+**On Windows**, or on any machine without a working Python 3.11, use
+[uv](https://docs.astral.sh/uv/). It brings its own Python 3.11 and leaves the
+system one alone:
+```bash
+python -m pip install --user uv
+python -m uv python install 3.11
+cd backend
+python -m uv venv --python 3.11 .venv
+python -m uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
+.venv/Scripts/python.exe -m pytest
+```
+(`.venv/bin/python` on Linux/macOS.) The tests never load `claude-agent-sdk`,
+which bundles the whole Claude Code CLI. On a slow connection, install
+everything else first and add it later. Frontend: `cd frontend && npm ci && npm
+test && npm run build`.
+
+Phase 0 of the cloud plan added these tests:
+- `test_clone_rules.py`: URL and branch rules, the git invocation, and the
+  public-address check;
+- `test_ai_optional.py`: AI failures keep every structured verdict;
+- `test_docker_capability.py`: no Docker means skipped, not degraded;
+- `test_scan_runs.py`: one fact row per scan, plus the failed-lookup tally.
 Each test gets a throwaway SQLite DB (schema from the ORM models);
 `TEST_DATABASE_URL=postgresql+psycopg://…` runs them on Postgres instead (via
 migrations, tables truncated between tests — use a scratch DB).
