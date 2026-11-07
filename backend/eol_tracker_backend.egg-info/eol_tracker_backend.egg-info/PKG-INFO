@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: eol-tracker-backend
+Version: 0.1.0
+Summary: EOL/EOS tracker for CE open-source components — FastAPI + AI agents, file storage
+Requires-Python: >=3.11
+Requires-Dist: fastapi>=0.115
+Requires-Dist: uvicorn[standard]>=0.30
+Requires-Dist: pydantic>=2.7
+Requires-Dist: pydantic-settings>=2.3
+Requires-Dist: httpx>=0.27
+Requires-Dist: apscheduler>=3.10
+Requires-Dist: packaging>=24.0
+Requires-Dist: claude-agent-sdk>=0.1.0
+Requires-Dist: python-dotenv>=1.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23; extra == "dev"

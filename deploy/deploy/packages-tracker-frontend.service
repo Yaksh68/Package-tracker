@@ -1,0 +1,32 @@
+[Unit]
+Description=Packages Tracker frontend (Vite dev server)
+Documentation=file:///opt/packages-tracker/docs/DEVELOPER-GUIDE.md
+After=network-online.target packages-tracker-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/packages-tracker/frontend
+
+Environment=HOME=/root
+# node/npm come from nvm, which is not on the system PATH. If you switch node
+# versions, update this path (and ExecStart) to match `which npm`.
+Environment=PATH=/root/.nvm/versions/node/v22.16.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# CRITICAL: vite.config.ts defaults its /api proxy to 127.0.0.1:8000, but the tracker
+# backend listens on 8001. Without this the UI would silently proxy to the wrong
+# port (or to whatever else is listening on 8000).
+Environment=VITE_API_TARGET=http://127.0.0.1:8001
+
+ExecStart=/root/.nvm/versions/node/v22.16.0/bin/npm run dev -- --host 0.0.0.0 --port 5173
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=packages-tracker-frontend
+
+[Install]
+WantedBy=multi-user.target

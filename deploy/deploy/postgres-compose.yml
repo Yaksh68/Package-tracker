@@ -1,0 +1,30 @@
+# PostgreSQL for the Packages Tracker (Phase 1: only the database runs in Docker;
+# backend + frontend stay systemd services on the host).
+#
+#   docker compose -f deploy/postgres-compose.yml --env-file .env up -d
+#
+# Reads POSTGRES_PASSWORD from the tracker's .env; DATABASE_URL there must use
+# the same password. Bound to 127.0.0.1 only — not reachable from other hosts.
+name: packages-tracker
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: packages-tracker-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: packages_tracker
+      POSTGRES_USER: packages
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - packages-tracker-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U packages -d packages_tracker"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  packages-tracker-pgdata:

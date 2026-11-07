@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Packages Tracker</title>
+    <script>
+      // Apply the saved theme before first paint so the page doesn't flash.
+      (function () {
+        var m = "dark";
+        try {
+          if (localStorage.getItem("packages-tracker.theme") === "light") m = "light";
+        } catch (e) {}
+        var d = document.documentElement;
+        d.setAttribute("data-theme", m);
+        d.style.colorScheme = m;
+      })();
+    </script>
+    <style>
+      /* first-paint background; matches PALETTE.page in src/theme.tsx */
+      html[data-theme="dark"], html[data-theme="dark"] body { background: #131519; }
+      html[data-theme="light"], html[data-theme="light"] body { background: #f4f5f7; }
+      body { margin: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

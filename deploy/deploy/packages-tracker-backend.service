@@ -1,0 +1,38 @@
+[Unit]
+Description=Packages Tracker backend (FastAPI + APScheduler interval scans)
+Documentation=file:///opt/packages-tracker/docs/DEVELOPER-GUIDE.md
+# PostgreSQL runs in Docker (deploy/postgres-compose.yml, restart: unless-stopped).
+# Startup runs DB migrations; if Postgres isn't up yet the process exits and
+# Restart=on-failure retries every 5s until it is.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+# `.env` (incl. DATABASE_URL) is loaded relative to cwd (config.py:
+# env_file=(".env", "../.env")), and alembic.ini lives here — so the backend dir
+# must be the working dir.
+WorkingDirectory=/opt/packages-tracker/backend
+
+# HOME is required, not cosmetic: the AI agents locate the `claude` CLI by globbing
+# ~/.vscode-server/extensions/anthropic.claude-code-*/... (transport.resolve_cli_path),
+# and that binary carries the subscription login used instead of an API key.
+Environment=HOME=/root
+Environment=PATH=/opt/packages-tracker/backend/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# No --reload here: the reload watcher is a dev-loop tool and spawns a child process
+# that complicates supervision. After changing backend code, run:
+#   systemctl restart packages-tracker-backend
+ExecStart=/opt/packages-tracker/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001
+
+Restart=on-failure
+RestartSec=5
+# A scan may be mid-flight; allow it to finish writing its snapshot before SIGKILL.
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=packages-tracker-backend
+
+[Install]
+WantedBy=multi-user.target
