@@ -14,12 +14,13 @@ is still only fetched once.
 """
 from __future__ import annotations
 
+import json
+import re
+import time
+from dataclasses import dataclass, field
 from datetime import date
 
 import httpx
-
-import json
-import re
 
 from .. import scanlog, settings_store
 from ..config import get_settings
@@ -34,6 +35,26 @@ from ..models import (
 )
 from . import apt_index, source_apis
 from .transport import run_text_agent, sum_tokens
+
+
+@dataclass
+class AiOutcome:
+    """How the AI research pass went for one scan. It's reported separately
+    from the structured results, which an AI problem never touches: a failed
+    or skipped AI pass leaves every endoflife.date / registry / GitHub verdict
+    in place, and doesn't make the snapshot "degraded".
+
+    status: off (toggle off) | ok | partial (some batches failed) | failed |
+    quota (rate limit or quota reached) | no_key (no provider configured;
+    used once API keys arrive)."""
+    status: str = "off"
+    detail: str = ""
+    candidates: int = 0
+    batches: int = 0
+    failed_batches: int = 0
+    skipped_batches: int = 0
+    seconds: float = 0.0
+    tokens: dict = field(default_factory=dict)
 
 
 def _stale(last: date | None, years: int) -> bool:
@@ -370,6 +391,7 @@ async def enrich(
     today: date | None = None,
     distro_by_source: dict[str, tuple[str, str]] | None = None,
     apt_indexes: dict[str, apt_index.AptIndex] | None = None,
+    ai_outcome: AiOutcome | None = None,
 ) -> list[Enrichment]:
     """Enrich a list of packages against today's upstream state (no caching).
 
@@ -378,7 +400,12 @@ async def enrich(
 
     `distro_by_source` maps a `source_file` to the distribution behind it
     (`{"image:ubuntu:24.04": ("ubuntu", "24.04")}`) — the support window applied
-    to that source's distro-maintained OS packages."""
+    to that source's distro-maintained OS packages.
+
+    `ai_outcome`, when given, is filled in with how the AI pass went. The AI
+    pass is optional: whatever it does, including raising, the structured
+    results are returned."""
+    outcome = ai_outcome if ai_outcome is not None else AiOutcome()
     today = today or date.today()
     distro_by_source = distro_by_source or {}
 
@@ -412,9 +439,20 @@ async def enrich(
 
     # --- AI research second pass ---------------------------------------------
     # Ambiguous packages only (see `_needs_ai`). With no cache, this runs on
-    # every scan when the toggle is on.
+    # every scan when the toggle is on. It must never cost the scan its
+    # structured results: before this guard, an exception from the AI (CLI
+    # missing, a batch timing out) escaped enrich() and the pipeline flagged
+    # every package UNKNOWN.
     if settings_store.get_runtime_settings().get("use_enrichment_agent"):
-        await _ai_pass(list(results.values()), today=today)
+        try:
+            await _ai_pass(list(results.values()), today=today, outcome=outcome)
+        except Exception as ex:  # noqa: BLE001 - AI is optional; keep the structured verdicts
+            outcome.status = "failed"
+            outcome.detail = _error_text(ex)
+            scanlog.emit("agent", f"AI research failed, structured verdicts kept: {outcome.detail}",
+                         level="warn")
+    else:
+        outcome.status = "off"
 
     # preserve input order (first occurrence per key)
     return [results[k] for k in by_key]
@@ -520,45 +558,121 @@ def _merge_ai(e: Enrichment, v) -> None:
             urls.add(s.url)
 
 
+def _error_text(ex: BaseException) -> str:
+    text = f"{type(ex).__name__}: {ex}" if str(ex) else type(ex).__name__
+    return text if len(text) <= 300 else text[:300] + "…"
+
+
+# What a failed batch's error says about the next one. Rejected credentials,
+# an exhausted quota or a missing CLI fail every remaining batch the same way,
+# so the pass stops instead of repeating the call.
+_QUOTA_HINTS = ("429", "rate limit", "rate_limit", "quota", "usage limit", "credit balance",
+                "too many requests", "insufficient credit")
+_AUTH_HINTS = ("401", "403", "authentication", "unauthorized", "invalid api key",
+               "invalid x-api-key", "not logged in", "/login", "permission denied", "forbidden")
+_CONFIG_HINTS = ("could not find the `claude` cli", "claude_cli_path", "filenotfounderror",
+                 "no such file or directory", "cannot find the file")
+_STOP_KINDS = {"auth", "quota", "config"}
+_KIND_TEXT = {
+    "auth": "authentication failed — check the API key or the Claude CLI login",
+    "quota": "rate limit or quota reached",
+    "config": "the AI isn't set up on this server",
+    "timeout": "timed out",
+    "invalid": "the AI's answer wasn't valid JSON",
+    "error": "the AI call failed",
+}
+
+
+def _classify(message: str) -> str:
+    m = message.lower()
+    if m.startswith("invalid output"):
+        return "invalid"
+    if any(h in m for h in _QUOTA_HINTS):
+        return "quota"
+    if any(h in m for h in _AUTH_HINTS):
+        return "auth"
+    if any(h in m for h in _CONFIG_HINTS):
+        return "config"
+    if "timed out" in m or "timeout" in m:
+        return "timeout"
+    return "error"
+
+
+def _outcome_status(total: int, failures: list[str], skipped: int, stopped: str | None) -> tuple[str, str]:
+    if not failures:
+        return "ok", f"{total} batch(es) researched"
+    lost = len(failures) + skipped
+    if stopped == "quota":
+        status = "quota"
+    elif lost >= total:
+        status = "failed"
+    else:
+        status = "partial"
+    detail = f"{len(failures)} of {total} batch(es) failed: {_KIND_TEXT[stopped or failures[-1]]}"
+    if skipped:
+        detail += f"; {skipped} skipped"
+    return status, detail
+
+
 async def _run_ai_batch(
-    batch: list[Enrichment], *, max_searches: int
+    batch: list[Enrichment], *, max_searches: int, errors: list[str] | None = None,
 ) -> tuple[AiVerdictBatch | None, dict]:
     """Return the parsed verdicts (or None) and the tokens this batch spent.
+    Never raises: why a batch failed is appended to `errors`.
 
     A retry after malformed output is charged into the same total: the tokens
     were spent whether or not the second attempt parsed."""
+    errors = errors if errors is not None else []
     prompt = _AI_PROMPT_TMPL.format(
         max_searches=max_searches,
         packages=json.dumps([_signal_line(e) for e in batch], indent=2),
     )
     spent: dict = {}
     for _ in range(2):  # initial + one retry on malformed output
-        res = await run_text_agent(
-            prompt,
-            allowed_tools=["WebSearch", "WebFetch"],
-            append_system=_AI_SYSTEM,
-            timeout=420.0,
-        )
+        try:
+            res = await run_text_agent(
+                prompt,
+                allowed_tools=["WebSearch", "WebFetch"],
+                append_system=_AI_SYSTEM,
+                timeout=420.0,
+            )
+        except Exception as ex:  # noqa: BLE001 - the caller keeps the structured verdicts
+            # No retry: a timeout or a missing CLI won't fix itself, and a
+            # retried timeout would double the wait.
+            errors.append(_error_text(ex))
+            return None, spent
         sum_tokens(spent, res.tokens())
         if res.is_error:
+            errors.append(res.error_message or "agent error")
             scanlog.emit("agent", f"AI enrichment batch error: {res.error_message}", level="warn")
+            if _classify(errors[-1]) in _STOP_KINDS:
+                return None, spent  # a rejected key or exhausted quota fails again
             continue
         try:
             return AiVerdictBatch(**_extract_json(res.text)), spent
         except Exception as ex:  # noqa: BLE001 - malformed → retry then degrade
+            errors.append(f"invalid output: {ex}")
             scanlog.emit("agent", f"AI batch output invalid ({ex}); retrying", level="warn")
     return None, spent
 
 
-async def _ai_pass(pool: list[Enrichment], *, today) -> list[Enrichment]:
+async def _ai_pass(
+    pool: list[Enrichment], *, today, outcome: AiOutcome | None = None,
+) -> list[Enrichment]:
     """Run the AI research agent over the ambiguous, not-yet-AI-checked entries in
-    `pool`. Returns the candidates it processed (marked `ai_checked`)."""
+    `pool`, and return those candidates. Only candidates in a batch that came
+    back with verdicts are marked `ai_checked`. A failed batch never raises:
+    it's recorded on `outcome`, and its packages keep their structured
+    verdicts."""
+    outcome = outcome if outcome is not None else AiOutcome()
     settings = get_settings()
     candidates = [
         e for e in pool
         if _needs_ai(e, stale_years=settings.stale_years) and not e.ai_checked
     ]
+    outcome.candidates = len(candidates)
     if not candidates:
+        outcome.status, outcome.detail = "ok", "no ambiguous packages"
         scanlog.emit("enrich", "AI enrichment: 0 new ambiguous packages, skipped")
         return []
 
@@ -569,9 +683,17 @@ async def _ai_pass(pool: list[Enrichment], *, today) -> list[Enrichment]:
         data={"candidates": [f"{e.ecosystem.value}:{e.name}" for e in candidates]},
     )
 
+    t0 = time.monotonic()
     totals: dict = {}
-    for batch in batches:
-        result, spent = await _run_ai_batch(batch, max_searches=settings.web_search_max_uses)
+    failures: list[str] = []  # the error kind of each failed batch
+    attempted = 0
+    stopped: str | None = None
+    for i, batch in enumerate(batches, start=1):
+        attempted += 1
+        errors: list[str] = []
+        result, spent = await _run_ai_batch(
+            batch, max_searches=settings.web_search_max_uses, errors=errors,
+        )
         sum_tokens(totals, spent)
         scanlog.emit(
             "agent",
@@ -580,13 +702,23 @@ async def _ai_pass(pool: list[Enrichment], *, today) -> list[Enrichment]:
             f"over {len(batch)} package(s)",
             data=spent,
         )
-        # Mark every attempted candidate as checked so we don't re-run (or re-spend)
-        # on it next scan — even if the batch degraded or returned no verdict for it.
+        if result is None:
+            kind = _classify(errors[-1]) if errors else "invalid"
+            failures.append(kind)
+            scanlog.emit(
+                "agent",
+                f"AI batch {i}/{len(batches)} failed ({_KIND_TEXT[kind]}) → keeping structured verdicts",
+                level="warn",
+                data={"kind": kind, "error": errors[-1] if errors else None},
+            )
+            if kind in _STOP_KINDS:
+                stopped = kind
+                break
+            continue
+        # Only a batch that came back with verdicts counts as researched: the
+        # UI shows `ai_checked` as "AI researched".
         for e in batch:
             e.ai_checked = True
-        if result is None:
-            scanlog.emit("agent", "AI batch degraded → keeping structured verdicts", level="warn")
-            continue
         by_name = {(v.ecosystem, v.name.lower()): v for v in result.verdicts}
         for e in batch:
             v = by_name.get((e.ecosystem, e.name.lower()))
@@ -603,10 +735,20 @@ async def _ai_pass(pool: list[Enrichment], *, today) -> list[Enrichment]:
                       "citations": [s.url for s in e.sources]},
             )
 
+    outcome.batches = len(batches)
+    outcome.failed_batches = len(failures)
+    outcome.skipped_batches = len(batches) - attempted
+    outcome.seconds = round(time.monotonic() - t0, 1)
+    outcome.tokens = totals
+    outcome.status, outcome.detail = _outcome_status(
+        len(batches), failures, outcome.skipped_batches, stopped,
+    )
     scanlog.emit(
         "enrich",
         f"AI enrichment spent {totals.get('total_tokens', 0):,} tokens across "
         f"{len(batches)} batch(es) for {len(candidates)} package(s)",
         data=totals,
     )
+    if outcome.status != "ok":
+        scanlog.emit("enrich", f"AI research {outcome.status}: {outcome.detail}", level="warn")
     return candidates

@@ -84,6 +84,9 @@ class SnapshotRow(Base):
     package_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     flag_counts: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
     degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # The AI research outcome (SnapshotSummary.ai_status / ai_detail)
+    ai_status: Mapped[str | None] = mapped_column(String(16))
+    ai_detail: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

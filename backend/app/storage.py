@@ -196,7 +196,8 @@ def _snapshot(s: Session, repo_id: str, branch: str, ts: str, *, create: bool) -
 
 def _summary(row: SnapshotRow) -> SnapshotSummary:
     return SnapshotSummary(ts=row.ts, package_count=row.package_count,
-                           flag_counts=row.flag_counts or {}, degraded=row.degraded)
+                           flag_counts=row.flag_counts or {}, degraded=row.degraded,
+                           ai_status=row.ai_status, ai_detail=row.ai_detail)
 
 
 def _apply_summary(row: SnapshotRow, summary: SnapshotSummary) -> None:
@@ -204,6 +205,8 @@ def _apply_summary(row: SnapshotRow, summary: SnapshotSummary) -> None:
     row.package_count = summary.package_count
     row.flag_counts = dict(summary.flag_counts)
     row.degraded = summary.degraded
+    row.ai_status = summary.ai_status
+    row.ai_detail = summary.ai_detail
 
 
 def load_index(repo_id: str, branch: str) -> list[SnapshotSummary]:

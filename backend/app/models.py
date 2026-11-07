@@ -391,6 +391,12 @@ class SnapshotSummary(BaseModel):
     package_count: int = 0
     flag_counts: dict[str, int] = Field(default_factory=dict)
     degraded: bool = False
+    # How the optional AI research pass went: off | ok | partial | failed |
+    # quota | no_key (see enrichment_agent.AiOutcome). Kept apart from
+    # `degraded` on purpose: an AI problem leaves the structured data complete.
+    # None for snapshots written before this existed.
+    ai_status: str | None = None
+    ai_detail: str | None = None
 
 
 class ScanState(str, Enum):

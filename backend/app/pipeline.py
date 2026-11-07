@@ -12,7 +12,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 
-from . import flags, scanlog, storage, uploads
+from . import flags, scanlog, settings_store, storage, uploads
 from .agents import apt_index, enrichment_agent, extraction_agent, image_inspect, source_apis
 from .agents.clone import CloneError, shallow_clone
 from .agents.image_inspect import ImageInspectError
@@ -143,6 +143,8 @@ async def run_scan(
         # per-Dockerfile base image + added apt repos, read while the clone exists
         docker_ctx = image_inspect.DockerfileContext()
         apt_indexes: dict[str, apt_index.AptIndex] = {}
+        # how the optional AI research went; reported apart from `degraded`
+        ai = enrichment_agent.AiOutcome()
 
         def _phase(name: str) -> None:
             _set(repo.id, branch, phase=name)
@@ -312,6 +314,7 @@ async def run_scan(
                 try:
                     enrichments = await enrichment_agent.enrich(
                         packages, distro_by_source=distro_by_source, apt_indexes=apt_indexes,
+                        ai_outcome=ai,
                     )
                     log.emit("enrich",
                              f"Enriched {len(enrichments)} packages in {_since(t2)}s",
@@ -320,6 +323,8 @@ async def run_scan(
                     degraded = True
                     _fail(repo.id, branch, "enrich", f"enrichment degraded: {e}")
                     log.emit("enrich", f"enrichment degraded: {e}", level="error")
+            elif settings_store.get_runtime_settings().get("use_enrichment_agent"):
+                ai.status, ai.detail = "ok", "no packages to research"
 
             # 4. flag
             _phase("flag")
@@ -337,6 +342,7 @@ async def run_scan(
             storage.write_flags(repo.id, branch, ts, flag_list)
             summary = SnapshotSummary(
                 ts=ts, package_count=len(packages), flag_counts=counts, degraded=degraded,
+                ai_status=ai.status, ai_detail=ai.detail or None,
             )
             storage.upsert_index_entry(repo.id, branch, summary)
             log.emit("snapshot", f"Wrote snapshot {ts}"
