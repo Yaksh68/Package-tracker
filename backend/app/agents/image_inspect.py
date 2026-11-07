@@ -345,7 +345,7 @@ def dockerfile_context(clone_path: Path) -> DockerfileContext:
             text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        rel = str(p.relative_to(clone_path))  # same naming as extraction's source_file
+        rel = p.relative_to(clone_path).as_posix()  # same naming as extraction's source_file
         if base := parsers.dockerfile_base(text):
             ctx.bases[rel] = base
         if repos := parsers.parse_apt_sources(text):

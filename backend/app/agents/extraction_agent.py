@@ -71,7 +71,7 @@ def extract_vendored(clone_path: Path) -> list[Package]:
             continue
         if parsers.under_skipped(lib.relative_to(clone_path).parts):
             continue
-        rel = str(lib.relative_to(clone_path))
+        rel = lib.relative_to(clone_path).as_posix()
         covered: set[str] = set()
         # 1. dist-info (authoritative)
         for di in lib.glob("*.dist-info"):
@@ -94,7 +94,7 @@ def extract_deterministic(
 ) -> list[Package]:
     packages: list[Package] = []
     for path in walk_manifests(clone_path):
-        rel = str(path.relative_to(clone_path))
+        rel = path.relative_to(clone_path).as_posix()
         packages.extend(parsers.parse_file(path, rel, tag_vars))
     packages.extend(extract_vendored(clone_path))
     return dedup(packages)

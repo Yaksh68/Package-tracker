@@ -1,0 +1,25 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Frontend
+node_modules/
+frontend/dist/
+
+# Runtime data the backend writes (uploaded zips, apt-index cache, legacy
+# file-storage tree). It belongs on the server, not in git.
+backend/data/
+backend/uploads/
+backend/cache/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
