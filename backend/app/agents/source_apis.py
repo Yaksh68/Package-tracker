@@ -9,9 +9,11 @@ ambiguous cases only.
 """
 from __future__ import annotations
 
+import contextvars
 import re
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from packaging.version import InvalidVersion, Version
@@ -59,14 +61,47 @@ def _to_date(v: Any) -> date | None:
     return None
 
 
+# Failed lookups during one scan, counted by "host:kind", e.g.
+# {"api.github.com:rate_limited": 3}. The pipeline starts a tally per scan and
+# stores it on the scan's `scan_runs` row; outside a scan nothing is counted.
+# A 404 is a normal answer here (endoflife.date doesn't track most packages),
+# so only rate limits, server errors, bad responses and network errors count.
+_upstream_errors: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+    "upstream_errors", default=None
+)
+
+
+def start_error_tally() -> dict[str, int]:
+    """Count this task's failed lookups into a new dict (one per scan)."""
+    tally: dict[str, int] = {}
+    _upstream_errors.set(tally)
+    return tally
+
+
+def _tally(url: str, kind: str) -> None:
+    tally = _upstream_errors.get()
+    if tally is not None:
+        key = f"{urlsplit(url).hostname or '?'}:{kind}"
+        tally[key] = tally.get(key, 0) + 1
+
+
 async def _get_json(client: httpx.AsyncClient, url: str, **kw) -> Any | None:
     try:
         r = await client.get(url, **kw)
-        if r.status_code == 200:
-            return r.json()
-        return {"__status__": r.status_code}
-    except (httpx.HTTPError, ValueError):
+    except httpx.HTTPError:
+        _tally(url, "network")
         return None
+    if r.status_code == 200:
+        try:
+            return r.json()
+        except ValueError:
+            _tally(url, "bad_response")
+            return None
+    if r.status_code == 429 or (r.status_code == 403 and "api.github.com" in url):
+        _tally(url, "rate_limited")
+    elif r.status_code >= 500:
+        _tally(url, "server_error")
+    return {"__status__": r.status_code}
 
 
 async def endoflife_products(client: httpx.AsyncClient) -> list[dict]:

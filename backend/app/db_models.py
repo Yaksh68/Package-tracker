@@ -13,6 +13,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -168,3 +169,44 @@ class AppSettingRow(Base):
 
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[object] = mapped_column(JSONType, nullable=True)
+
+
+class ScanRunRow(Base):
+    """One row per scan attempt: the fact table behind the admin analytics. It's
+    written once, when the scan ends, including failed scans, which never
+    become a listed snapshot. Like `snapshots`, it has no FK to `repos`: the
+    usage history outlives a deleted repo. Deleting an account (Phase 2a)
+    removes its rows by workspace."""
+    __tablename__ = "scan_runs"
+    __table_args__ = (
+        Index("ix_scan_runs_started_at", "started_at"),
+        Index("ix_scan_runs_repo_branch", "repo_id", "branch"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    repo_id: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(Text)  # set from Phase 2a on
+    branch: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_ts: Mapped[str | None] = mapped_column(String(32))  # None if it never got listed
+    triggered_by: Mapped[str] = mapped_column(String(16), nullable=False)  # scheduled | manual | initial | upload
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # set once the queue exists
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)  # done | degraded | error
+    stage_seconds: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+    issue_stages: Mapped[list] = mapped_column(JSONType, nullable=False, default=list)
+    first_error: Mapped[str | None] = mapped_column(Text)
+    package_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    package_counts: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+    flag_counts: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+    ai_status: Mapped[str | None] = mapped_column(String(16))
+    ai_detail: Mapped[str | None] = mapped_column(Text)
+    ai_provider: Mapped[str | None] = mapped_column(Text)
+    ai_model: Mapped[str | None] = mapped_column(Text)
+    ai_batches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_failed_batches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_searches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_cost_usd: Mapped[float | None] = mapped_column(Float)
+    upstream_errors: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)

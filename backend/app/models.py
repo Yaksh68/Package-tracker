@@ -446,3 +446,37 @@ class ScanLog(BaseModel):
     snapshot_ts: str | None = None
     state: ScanState = ScanState.idle
     entries: list[LogEntry] = Field(default_factory=list)
+
+
+class ScanRunRecord(BaseModel):
+    """The facts of one scan attempt (a `scan_runs` row), kept for analytics.
+    Written for every scan, including failed ones."""
+    repo_id: str
+    workspace_id: str | None = None
+    branch: str
+    snapshot_ts: str | None = None  # None when the scan never produced a listed snapshot
+    triggered_by: str = "manual"    # scheduled | manual | initial | upload
+    queued_at: datetime | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    outcome: Literal["done", "degraded", "error"]
+    # wall-clock seconds per stage: clone, extract, inspect, enrich (which
+    # includes ai), ai, flag, snapshot
+    stage_seconds: dict[str, float] = Field(default_factory=dict)
+    issue_stages: list[str] = Field(default_factory=list)
+    first_error: str | None = None
+    package_count: int = 0
+    package_counts: dict[str, int] = Field(default_factory=dict)  # by ecosystem
+    flag_counts: dict[str, int] = Field(default_factory=dict)
+    ai_status: str | None = None
+    ai_detail: str | None = None
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    ai_batches: int = 0
+    ai_failed_batches: int = 0
+    ai_tokens_in: int = 0   # fresh + cache-read + cache-write input tokens
+    ai_tokens_out: int = 0
+    ai_searches: int = 0
+    ai_cost_usd: float | None = None
+    # failed outside lookups by "host:kind", e.g. {"api.github.com:rate_limited": 3}
+    upstream_errors: dict[str, int] = Field(default_factory=dict)
