@@ -104,8 +104,14 @@ def is_scanning(repo_id: str, branch: str) -> bool:
 
 
 async def run_scan(
-    repo: Repo, branch: str, *, use_extraction_agent: bool | None = None
+    repo: Repo,
+    branch: str,
+    *,
+    use_extraction_agent: bool | None = None,
+    trigger: str = "manual",
 ) -> ScanStatus:
+    """Scan one branch. `trigger` says why it ran: scheduled, manual, initial
+    (first scan after the repo was added) or upload."""
     lock = _lock(repo.id, branch)
     if lock.locked():
         return get_status(repo.id, branch)  # overlap guard: skip if already running

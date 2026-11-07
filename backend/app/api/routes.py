@@ -10,6 +10,7 @@ from fastapi.responses import PlainTextResponse
 
 from .. import flags as flags_mod
 from .. import scanlog, scheduler, settings_store, storage, uploads
+from ..git_rules import RepoUrlError, check_branch
 from ..models import (
     Repo,
     RepoCreate,
@@ -111,7 +112,8 @@ async def create_repo(body: RepoCreate) -> dict:
     storage.upsert_repo(repo)
     scheduler.sync_repo(repo)
     for branch in repo.branches:
-        scheduler.trigger_now(repo, branch)  # first scan starts immediately, per branch
+        # first scan starts immediately, per branch
+        scheduler.trigger_now(repo, branch, trigger="initial")
     return _mask(repo)
 
 
@@ -124,6 +126,13 @@ def get_repo(repo_id: str) -> dict:
 def update_repo(repo_id: str, body: RepoUpdate) -> dict:
     repo = _require_repo(repo_id)
     updates = body.model_dump(exclude_unset=True)
+    # A git repo's branches go to `git clone`; upload "branches" are free-form
+    # version labels, so only git repos get the ref-name check.
+    if repo.source == "git" and updates.get("branches"):
+        try:
+            updates["branches"] = [check_branch(b) for b in updates["branches"]]
+        except RepoUrlError as e:
+            raise HTTPException(422, str(e)) from e
     reflag = "release_date" in updates or (
         "ignored_packages" in updates and updates["ignored_packages"] != repo.ignored_packages
     )
@@ -184,7 +193,7 @@ async def scan_now(repo_id: str, branch: str = Query(...)) -> dict:
         raise HTTPException(409, "a scan is already in progress")
     if repo.source == "upload" and not uploads.has_upload(repo_id, branch):
         raise HTTPException(400, f"no zip uploaded for version '{branch}' yet")
-    scheduler.trigger_now(repo, branch)
+    scheduler.trigger_now(repo, branch, trigger="manual")
     return {"status": "queued", "repo_id": repo_id, "branch": branch}
 
 
@@ -229,7 +238,7 @@ async def create_upload_repo(file: UploadFile = File(...), meta: str = Form(...)
     )
     storage.upsert_repo(repo)
     scheduler.sync_repo(repo)
-    scheduler.trigger_now(repo, version)
+    scheduler.trigger_now(repo, version, trigger="upload")
     return _mask(repo)
 
 
@@ -250,7 +259,7 @@ async def upload_version_zip(
     repo = repo.model_copy(update={"branches": branches, "url": f"upload://{file.filename}"})
     storage.upsert_repo(repo)
     scheduler.sync_repo(repo)
-    scheduler.trigger_now(repo, version)
+    scheduler.trigger_now(repo, version, trigger="upload")
     return _mask(repo)
 
 

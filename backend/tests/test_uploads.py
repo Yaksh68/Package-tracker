@@ -90,7 +90,7 @@ def test_versions_are_stored_separately_and_missing_one_is_a_clone_error():
 @pytest.fixture
 def client(monkeypatch):
     queued = []
-    monkeypatch.setattr(scheduler, "trigger_now", lambda repo, branch: queued.append((repo.id, branch)))
+    monkeypatch.setattr(scheduler, "trigger_now", lambda repo, branch, **kw: queued.append((repo.id, branch)))
     c = TestClient(app)
     c.queued = queued
     return c

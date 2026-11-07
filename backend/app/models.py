@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .git_rules import check_branch, check_repo_url
+
 
 # --------------------------------------------------------------------------- #
 # Extraction (Agent 1 output contract)                                        #
@@ -302,10 +304,21 @@ class RepoCreate(BaseModel):
     ignored_packages: list[str] = Field(default_factory=list)
     id: str | None = None  # server derives from url if omitted
 
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        return check_repo_url(v)  # RepoUrlError is a ValueError → 422
+
     @field_validator("branches", mode="before")
     @classmethod
     def _clean_branches(cls, v) -> list[str]:
         return clean_branches(v)
+
+    @field_validator("branches")
+    @classmethod
+    def _check_branches(cls, v: list[str]) -> list[str]:
+        # git repos only: upload "branches" are free-form version labels
+        return [check_branch(b) for b in v]
 
     @field_validator("image_tags", mode="before")
     @classmethod

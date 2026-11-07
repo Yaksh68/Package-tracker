@@ -14,7 +14,7 @@ def _no_real_scans(monkeypatch):
     # without this the test would spawn real asyncio tasks doing a real
     # `git clone` against a fake URL. sync_repo/unsync_repo are no-ops already
     # (no APScheduler instance running under a plain TestClient).
-    monkeypatch.setattr(scheduler, "trigger_now", lambda repo, branch: None)
+    monkeypatch.setattr(scheduler, "trigger_now", lambda repo, branch, **kw: None)
 
 
 @pytest.fixture
