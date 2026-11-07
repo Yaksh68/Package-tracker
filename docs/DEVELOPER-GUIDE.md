@@ -436,16 +436,64 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   (batches candidates, merges, logs per-package verdicts).
 
 ### `agents/transport.py` (the one place that talks to the model)
-- `resolve_cli_path()` — explicit setting → PATH → VS Code extension bundled binary.
-- `_is_root()` — root can't use `bypassPermissions`; fall back to `--allowedTools`.
-- `_run_subprocess(...)` — drives `claude --print --output-format stream-json
-  --input-format stream-json …`; parses events, collects assistant text and the
-  final result; emits `agent` tool-use/result events to scanlog
-  (`_log_tool_use`/`_log_tool_result`).
-- `_run_sdk(...)` — same contract via `claude_agent_sdk.query()`.
 - **`run_text_agent(prompt, *, cwd, allowed_tools, append_system, mcp_config,
-  model, add_dirs, timeout)`** → `AgentResult` — dispatches by `agent_backend`
-  (`subprocess` default / `sdk` / `auto` with fallback). `AgentError` on failure.
+  model, add_dirs, timeout)`** returns an `AgentResult`. It dispatches on the
+  configured provider (`ai.config.resolve()`):
+  - `claude-cli` goes to `_run_cli`, which picks a backend by `agent_backend`:
+    `subprocess` (the default), `sdk`, or `auto` (sdk, falling back to
+    subprocess);
+  - `anthropic` goes to `ai.anthropic_provider`;
+  - `openai-compatible` goes to `ai.openai_compat`.
+- Raises `AiConfigError` when no provider is usable. An API provider asked for
+  file tools (the AI extraction agent) is refused, since only the CLI can read
+  the clone.
+- `resolve_cli_path()` looks in order at the explicit setting, PATH, then the
+  newest VS Code / Cursor extension binary, chosen by version number
+  (`claude.exe` on Windows).
+- `_is_root()`: root can't use `bypassPermissions`, so it falls back to
+  `--allowedTools`.
+- `_run_subprocess(...)` drives `claude --print --output-format stream-json
+  --input-format stream-json …`. It parses events, collects the assistant text
+  and the final result, and emits `agent` tool events to the scanlog. It
+  counts WebSearch/WebFetch from the stream, because the CLI reports 0 for
+  them in `usage.server_tool_use`.
+- `_run_sdk(...)`: the same contract, through `claude_agent_sdk.query()`.
+
+### `ai/` (AI providers, Phase 1 of the cloud plan)
+- `config.py`: `resolve()` turns `AI_PROVIDER` and the related settings into
+  an `AiConfig`, or `(None, why)` (see the README configuration table). Without
+  `AI_PROVIDER`, the local mode uses the Claude CLI, and the public mode has no
+  provider. Presets: openai, gemini, groq, openrouter.
+- `anthropic_provider.py` (official `anthropic` SDK):
+  - uses the server-side `web_search` / `web_fetch` tools; Haiku gets the
+    basic versions, Opus and Sonnet 4.6+ get the `_20260209` ones;
+  - resumes `pause_turn`, and treats `refusal` as a failed batch;
+  - sends `fallbacks="default"` for Fable 5.1, Opus 5.5 / 5 and Sonnet 5.5;
+  - sums usage, estimates cost (`pricing.py`), and collects every URL search
+    and fetch returned;
+  - `list_models()` checks a key at no token cost.
+- `openai_compat.py` (official `openai` SDK): a tool loop with web search the
+  app runs itself.
+  - `web_search` goes through `search.py` (Tavily or Exa, with the user's
+    key), capped at `WEB_SEARCH_MAX_USES`.
+  - `fetch_url` only accepts URLs a search returned and only reaches public
+    addresses, re-checking every redirect, with time and size caps.
+  - When the rounds run out, `tool_choice="none"` asks for the answer.
+- `citations.py`:
+  - every deprecated or eol verdict and every successor needs a citation,
+    from every provider;
+  - when the provider exposes what its searches returned (the two API
+    adapters), each citation must be one of those URLs;
+  - an unbacked verdict is dropped, so the package keeps its structured
+    result.
+- `errors.py`: typed `AiAuthError`, `AiQuotaError`, `AiTimeoutError`,
+  `AiConfigError` and `AiProviderError`, which drive `ai_status`.
+  `redact_keys()` scrubs key-shaped strings from every logged error.
+- `result.py`: `AgentResult` (including `seen_urls`; `cost_usd` None means
+  "not estimated"), `sum_tokens` (which counts unpriced calls in
+  `cost_unknown`), and the tool-event logging.
+- The eval in `backend/evals/eol_research/` scores a provider against 18 known
+  packages. Its README has how to run it and the results so far.
 
 ---
 

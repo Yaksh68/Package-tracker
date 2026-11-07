@@ -140,13 +140,19 @@ async def extract_with_agent(
     last_err = ""
     spent: dict = {}
     for _ in range(retries + 1):
-        res = await run_text_agent(
-            prompt,
-            cwd=str(clone_path),
-            allowed_tools=["Read", "Glob", "Grep"],
-            append_system=_AGENT_SYSTEM,
-            add_dirs=[str(clone_path)],
-        )
+        try:
+            res = await run_text_agent(
+                prompt,
+                cwd=str(clone_path),
+                allowed_tools=["Read", "Glob", "Grep"],
+                append_system=_AGENT_SYSTEM,
+                add_dirs=[str(clone_path)],
+            )
+        except Exception as e:  # noqa: BLE001 - the AI fallback is optional; keep the parsed packages
+            # e.g. an API provider (it can't read files) or a missing CLI. Before
+            # this, the exception escaped and failed the whole scan.
+            scanlog.emit("extract", f"AI extraction agent unavailable, skipped: {e}", level="warn")
+            return []
         sum_tokens(spent, res.tokens())
         scanlog.emit(
             "extract",

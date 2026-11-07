@@ -55,6 +55,19 @@ class Settings(BaseSettings):
     # "sdk" (claude-agent-sdk), or "auto" (try sdk, fall back to subprocess).
     agent_backend: str = "subprocess"
 
+    # Which AI provider researches ambiguous packages (see app/ai/config.py).
+    # Unset = the Claude CLI above, in the local mode only.
+    ai_provider: str = ""
+    ai_model: str = ""
+    ai_api_key: str | None = None
+    ai_base_url: str = ""
+    # Web search for OpenAI-compatible providers, which have none built in:
+    # "tavily" or "exa", with that service's key.
+    search_provider: str = ""
+    search_api_key: str | None = None
+    # Most tool calls one OpenAI-compatible research conversation may make.
+    ai_max_tool_rounds: int = 8
+
     # Run the AI extraction agent (fallback for unknown manifest formats).
     # Off by default: deterministic parsers cover the target repos with no AI cost.
     use_extraction_agent: bool = False

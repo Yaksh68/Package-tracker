@@ -86,6 +86,7 @@ async def test_package_counts_ai_usage_and_upstream_errors_are_recorded(monkeypa
         source_apis._tally("https://api.github.com/repos/x/y", "rate_limited")
         ai_outcome.status, ai_outcome.detail = "ok", "2 batch(es) researched"
         ai_outcome.batches, ai_outcome.seconds = 2, 3.5
+        ai_outcome.provider, ai_outcome.model = "claude-cli", get_settings().agent_model
         ai_outcome.tokens = {"input_tokens": 100, "cache_read_input_tokens": 50,
                              "cache_creation_input_tokens": 25, "output_tokens": 40,
                              "web_search_requests": 4, "cost_usd": 0.012}
