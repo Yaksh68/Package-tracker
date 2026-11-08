@@ -603,6 +603,8 @@ def components(
             "confidence": e.confidence.value if e else None,
             "summary": e.summary if e else None,
             "ai_researched": bool(e and e.ai_checked),
+            # the snapshot whose AI finding this scan reused (AI verdict reuse)
+            "ai_reused_from": e.ai_reused_from if e else None,
             "sources": [s.model_dump() for s in e.sources] if e else [],
             "flag": fl.status.value if fl else None,
             "reasons": fl.reasons if fl else [],

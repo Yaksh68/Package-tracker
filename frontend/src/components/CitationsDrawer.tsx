@@ -1,5 +1,5 @@
-import { Descriptions, Drawer, List, Space, Tag, Typography } from "antd";
-import { fmtDate } from "../format";
+import { Descriptions, Drawer, List, Space, Tag, Tooltip, Typography } from "antd";
+import { fmtDate, fmtSnapshotTs } from "../format";
 import type { CitationSource, Component } from "../types";
 import { FlagBadge } from "./FlagBadge";
 
@@ -42,7 +42,13 @@ export function CitationsDrawer({
             <FlagBadge flag={component.flag} />
             <Text type="secondary">{component.ecosystem}</Text>
             {component.confidence && <Text type="secondary">confidence: {component.confidence}</Text>}
-            {component.ai_researched && <Tag>AI researched</Tag>}
+            {component.ai_researched && (
+              <Tooltip title={component.ai_reused_from
+                ? `Researched in the scan of ${fmtSnapshotTs(component.ai_reused_from)} and reused, instead of asking the AI again. Change how long findings are reused in Settings.`
+                : undefined}>
+                <Tag>{component.ai_reused_from ? "AI researched (reused)" : "AI researched"}</Tag>
+              </Tooltip>
+            )}
           </Space>
 
           {component.reasons.length > 0 && (

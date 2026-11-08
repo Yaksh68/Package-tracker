@@ -283,6 +283,28 @@ def upsert_index_entry(repo_id: str, branch: str, summary: SnapshotSummary) -> N
         _apply_summary(_snapshot(s, repo_id, branch, summary.ts, create=True), summary)
 
 
+def recent_ai_results(workspace_id: str, names: list[str], since: datetime) -> list[tuple[str, dict]]:
+    """Findings with an AI answer (`ai_result`) for these package names, from
+    the workspace's listed scans since `since`, newest first, as
+    (snapshot ts, enrichment). The caller matches ecosystem and version."""
+    lowered = sorted({n.lower() for n in names})
+    out: list[tuple[str, dict]] = []
+    with session() as s:
+        for i in range(0, len(lowered), 500):  # keep each IN (...) small
+            rows = s.execute(
+                select(SnapshotRow.created_at, SnapshotRow.ts, EnrichmentRow.data)
+                .join(SnapshotRow, SnapshotRow.id == EnrichmentRow.snapshot_id)
+                .join(RepoRow, RepoRow.id == SnapshotRow.repo_id)
+                .where(RepoRow.workspace_id == workspace_id, SnapshotRow.indexed,
+                       SnapshotRow.created_at >= since,
+                       func.lower(EnrichmentRow.name).in_(lowered[i:i + 500]))
+            ).all()
+            out.extend((created, ts, data) for created, ts, data in rows
+                       if isinstance(data, dict) and data.get("ai_result"))
+    out.sort(key=lambda r: _utc(r[0]), reverse=True)
+    return [(ts, data) for _, ts, data in out]
+
+
 def snapshot_branches() -> list[tuple[str, str]]:
     """Every (repo_id, branch) that has history."""
     with session() as s:

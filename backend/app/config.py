@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     git_host_allowlist: str = ""
     # A clone running longer than this is killed.
     clone_timeout_seconds: int = 120
+    # Reuse an AI finding for the same ecosystem:name:version from the
+    # workspace's scans of the last N days instead of researching it again
+    # (0 = always research). The local workspace's default; others start at 7
+    # and change it in Settings.
+    ai_reuse_days: int = 7
     # How many scans run at once (scan_queue.py). In the public mode a
     # workspace runs one at a time, taking turns with the others.
     scan_workers: int = 2

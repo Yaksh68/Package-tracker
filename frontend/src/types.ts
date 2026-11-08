@@ -124,6 +124,8 @@ export interface Component {
   confidence: string | null;
   summary: string | null;
   ai_researched?: boolean;
+  /** The snapshot whose AI finding this scan reused instead of asking again. */
+  ai_reused_from?: string | null;
   sources: CitationSource[];
   flag: string | null;
   reasons: string[];
@@ -286,6 +288,8 @@ export interface WorkspaceSettings {
   ai_model: string;
   ai_base_url: string;
   search_provider: string;
+  /** Reuse AI findings from this workspace's scans of the last N days (0 = off). */
+  ai_reuse_days: number;
   secrets: Record<SecretName, SecretHint>;
 }
 

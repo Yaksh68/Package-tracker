@@ -1,8 +1,8 @@
 import { CheckCircleFilled, LinkOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Alert, App, AutoComplete, Button, Card, Descriptions, Form, Input, Progress, Result, Select, Skeleton, Space,
-  Switch, Typography,
+  Alert, App, AutoComplete, Button, Card, Descriptions, Form, Input, InputNumber, Progress, Result, Select, Skeleton,
+  Space, Switch, Typography,
 } from "antd";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, errorMessage } from "../api";
@@ -69,6 +69,7 @@ function fromSettings(s: WorkspaceSettings): AiFormValues {
     model: s.ai_model,
     baseUrl: s.ai_base_url,
     searchProvider: s.search_provider,
+    reuseDays: s.ai_reuse_days ?? 7,
     aiKey: "",
     searchKey: "",
     removeAiKey: false,
@@ -310,6 +311,17 @@ function AiResearchCard({ settings, editable }: { settings: WorkspaceSettings; e
             )}
           </>
         )}
+
+        <Form.Item
+          label="Reuse findings for"
+          extra="A package version the AI already researched in this workspace within this many days isn't researched again, which saves your quota. 0 asks the AI every time."
+        >
+          <Space>
+            <InputNumber min={0} max={90} precision={0} value={v.reuseDays} style={{ width: 90 }}
+              onChange={(n) => set({ reuseDays: n ?? 0 })} aria-label="Reuse findings for (days)" />
+            <span>days</span>
+          </Space>
+        </Form.Item>
 
         <Button type="primary" onClick={() => saveMut.mutate()} loading={saveMut.isPending} disabled={!editable || invalid}>
           Save

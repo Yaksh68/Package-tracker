@@ -72,6 +72,8 @@ export interface AiFormValues {
   model: string;
   baseUrl: string;
   searchProvider: string;
+  /** Reuse AI findings from the last N days (0 = always research). */
+  reuseDays: number;
   /** Typed into the form and not saved yet; "" keeps the saved key. */
   aiKey: string;
   searchKey: string;
@@ -177,16 +179,20 @@ export function baseUrlProblem(url: string, mode: "local" | "github"): string | 
 /** The settings patch for PUT /api/settings: only what changed. */
 export function settingsPatch(
   v: AiFormValues,
-  current: { use_enrichment_agent: boolean; ai_provider: string; ai_model: string; ai_base_url: string; search_provider: string },
-): Record<string, string | boolean> {
+  current: {
+    use_enrichment_agent: boolean; ai_provider: string; ai_model: string; ai_base_url: string;
+    search_provider: string; ai_reuse_days: number;
+  },
+): Record<string, string | boolean | number> {
   const p = providerInfo(v.provider.trim());
-  const next: Record<string, string | boolean> = {
+  const next: Record<string, string | boolean | number> = {
     use_enrichment_agent: v.enabled,
     ai_provider: v.provider.trim(),
     ai_model: v.model.trim(),
     // a preset's URL is built in, and only a custom endpoint uses one
     ai_base_url: p?.custom ? v.baseUrl.trim() : current.ai_base_url,
     search_provider: p?.needsSearch ? v.searchProvider.trim() : current.search_provider,
+    ai_reuse_days: v.reuseDays,
   };
   return Object.fromEntries(
     Object.entries(next).filter(([k, val]) => val !== current[k as keyof typeof current]),

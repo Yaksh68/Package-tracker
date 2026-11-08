@@ -18,13 +18,17 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
-from .. import scanlog, settings_store
+from pydantic import ValidationError
+
+from .. import scan_context, scanlog, settings_store, storage
 from ..config import get_settings
 from ..models import (
+    LOCAL_WORKSPACE_ID,
+    AiVerdict,
     AiVerdictBatch,
     Confidence,
     Ecosystem,
@@ -60,6 +64,7 @@ class AiOutcome:
     tokens: dict = field(default_factory=dict)
     provider: str | None = None  # AiConfig.label, e.g. "anthropic", "openai-compatible:groq"
     model: str | None = None
+    reused: int = 0  # findings taken from recent scans instead of researched again
 
 
 def _stale(last: date | None, years: int) -> bool:
@@ -691,6 +696,39 @@ async def _run_ai_batch(
     return None, spent
 
 
+def _reuse_recent(candidates: list[Enrichment]) -> int:
+    """AI verdict reuse: apply the AI's answer for the same ecosystem, name and
+    version from this workspace's scans of the last `ai_reuse_days` days,
+    instead of researching it again. Structured lookups stay fresh: only the
+    AI's part is reused, merged as if it had just answered. Returns how many."""
+    days = int(settings_store.get_runtime_settings().get("ai_reuse_days") or 0)
+    if days <= 0:
+        return 0
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    workspace = scan_context.workspace_id() or LOCAL_WORKSPACE_ID
+    found: dict[str, tuple[str, dict]] = {}
+    for ts, data in storage.recent_ai_results(workspace, [e.name for e in candidates], since):
+        key = f"{data.get('ecosystem')}:{str(data.get('name', '')).lower()}:{data.get('version') or ''}"
+        found.setdefault(key, (ts, data))  # newest first
+    reused = 0
+    for e in candidates:
+        if (hit := found.get(e.key)) is None:
+            continue
+        ts, data = hit
+        try:
+            v = AiVerdict.model_validate(data["ai_result"])
+        except ValidationError:
+            continue
+        _merge_ai(e, v)
+        e.ai_result, e.ai_checked, e.ai_reused_from = data["ai_result"], True, ts
+        reused += 1
+    if reused:
+        scanlog.emit("enrich", f"AI research: reused {reused} finding(s) from this workspace's scans "
+                               f"of the last {days} day(s) instead of researching them again",
+                     data={"reused": [e.key for e in candidates if e.ai_reused_from]})
+    return reused
+
+
 async def _ai_pass(
     pool: list[Enrichment], *, today, outcome: AiOutcome | None = None,
 ) -> list[Enrichment]:
@@ -711,11 +749,17 @@ async def _ai_pass(
         scanlog.emit("enrich", "AI enrichment: 0 new ambiguous packages, skipped")
         return []
 
-    batches = _chunk(candidates, settings.enrichment_batch_size)
+    outcome.reused = _reuse_recent(candidates)
+    to_research = [e for e in candidates if not e.ai_reused_from]
+    if not to_research:
+        outcome.status, outcome.detail = "ok", f"reused {outcome.reused} recent finding(s)"
+        return candidates
+
+    batches = _chunk(to_research, settings.enrichment_batch_size)
     scanlog.emit(
         "enrich",
-        f"AI enrichment: {len(candidates)} ambiguous packages → {len(batches)} batch(es)",
-        data={"candidates": [f"{e.ecosystem.value}:{e.name}" for e in candidates]},
+        f"AI enrichment: {len(to_research)} ambiguous packages → {len(batches)} batch(es)",
+        data={"candidates": [f"{e.ecosystem.value}:{e.name}" for e in to_research]},
     )
 
     t0 = time.monotonic()
@@ -760,6 +804,7 @@ async def _ai_pass(
             if v is None:
                 continue
             _merge_ai(e, v)
+            e.ai_result = v.model_dump(mode="json")  # kept for reuse by later scans
             scanlog.emit(
                 "agent",
                 f"AI: {e.ecosystem.value}:{e.name} → {e.verdict.value}"
@@ -781,7 +826,7 @@ async def _ai_pass(
     scanlog.emit(
         "enrich",
         f"AI enrichment spent {totals.get('total_tokens', 0):,} tokens across "
-        f"{len(batches)} batch(es) for {len(candidates)} package(s)",
+        f"{len(batches)} batch(es) for {len(to_research)} package(s)",
         data=totals,
     )
     if outcome.status != "ok":
