@@ -24,7 +24,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from . import audit, storage, uploads
 from .models import Repo
-from .pipeline import run_scan
+from .pipeline import is_scanning, run_scan
 
 log = logging.getLogger("packages-tracker.scheduler")
 _scheduler: AsyncIOScheduler | None = None
@@ -60,6 +60,10 @@ async def _scan_job(repo_id: str, branch: str) -> None:
         return
     if repo.source == "upload" and not uploads.has_upload(repo_id, branch):
         return  # nothing to scan until a zip is uploaded for this version
+    if is_scanning(repo_id, branch):
+        # e.g. a manual scan got there first; recording this as a scan would mislead
+        log.info("scheduled scan for %s @ %s skipped: already scanning", repo_id, branch)
+        return
     log.info("scheduled scan starting for %s @ %s", repo_id, branch)
     audit.record("scan.scheduled", workspace_id=repo.workspace_id, actor_kind="scheduler",
                  target_type="repo", target_id=repo.id, branch=branch)
@@ -82,9 +86,14 @@ def shutdown() -> None:
         _scheduler = None
 
 
-def sync_repo(repo: Repo, *, catchup_slot: int = 0) -> int:
+def sync_repo(repo: Repo, *, catchup_slot: int = 0, scanning_now: set[str] | frozenset[str] = frozenset()) -> int:
     """Add/replace the interval job for each of the repo's branches, and drop
     jobs for branches no longer in `repo.branches` (e.g. removed on edit).
+
+    `scanning_now`: branches whose scan the caller is starting right now (a
+    new repo, an uploaded zip). Their schedule starts one interval later.
+    Without this, a never-scanned branch gets a catch-up 30 s later, which
+    scanned small repos twice (spending the workspace's AI quota twice).
 
     Returns how many branches were scheduled as overdue catch-ups, so a caller
     syncing several repos can keep staggering them by passing a running
@@ -100,7 +109,8 @@ def sync_repo(repo: Repo, *, catchup_slot: int = 0) -> int:
     now = datetime.now(timezone.utc)
     overdue = 0
     for branch in repo.branches:
-        first_run = _due_at(repo, branch, now)
+        first_run = (now + timedelta(days=repo.interval_days) if branch in scanning_now
+                     else _due_at(repo, branch, now))
         is_catchup = first_run is None
         if is_catchup:
             first_run = now + timedelta(

@@ -260,11 +260,11 @@ async def create_repo(body: RepoCreate, me: Principal = Depends(get_principal)) 
         created_at=datetime.now(timezone.utc),
     )
     storage.upsert_repo(repo)
-    scheduler.sync_repo(repo)
+    scheduler.sync_repo(repo, scanning_now=set(repo.branches))
     for branch in repo.branches:
         # first scan starts immediately, per branch
         scheduler.trigger_now(repo, branch, trigger="initial")
-    _audit(me, "repo.create", target_type="repo", target_id=repo.id, url=repo.url,
+    _audit(me, "repo.create", target_type="repo", target_id=repo.id, name=repo.name, url=repo.url,
            branches=repo.branches, token_set=bool(repo.token_override))
     _event(me, "repo_added", source="git", branches=len(repo.branches))
     return _mask(repo)
@@ -321,7 +321,7 @@ def delete_repo(repo_id: str, me: Principal = Depends(get_principal)) -> Respons
         raise HTTPException(409, "a scan is in progress; try again once it finishes")
     forget_repo(repo_id)
     _audit(me, "repo.delete", workspace_id=repo.workspace_id, target_type="repo",
-           target_id=repo.id, url=repo.url)
+           target_id=repo.id, name=repo.name, url=repo.url)
     _event(me, "repo_deleted")
     return Response(status_code=204)
 
@@ -405,10 +405,10 @@ async def create_upload_repo(file: UploadFile = File(...), meta: str = Form(...)
         created_at=datetime.now(timezone.utc),
     )
     storage.upsert_repo(repo)
-    scheduler.sync_repo(repo)
+    scheduler.sync_repo(repo, scanning_now={version})
     scheduler.trigger_now(repo, version, trigger="upload")
-    _audit(me, "repo.create", target_type="repo", target_id=repo.id, source="upload",
-           version=version)
+    _audit(me, "repo.create", target_type="repo", target_id=repo.id, name=repo.name,
+           source="upload", version=version)
     _event(me, "repo_added", source="upload")
     _event(me, "zip_upload")
     return _mask(repo)
@@ -431,7 +431,7 @@ async def upload_version_zip(
     branches = repo.branches if version in repo.branches else [*repo.branches, version]
     repo = repo.model_copy(update={"branches": branches, "url": f"upload://{file.filename}"})
     storage.upsert_repo(repo)
-    scheduler.sync_repo(repo)
+    scheduler.sync_repo(repo, scanning_now={version})
     scheduler.trigger_now(repo, version, trigger="upload")
     _audit(me, "zip.upload", workspace_id=repo.workspace_id, target_type="repo",
            target_id=repo.id, version=version)
