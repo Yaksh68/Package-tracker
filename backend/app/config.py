@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     platform_admins: str = ""
     max_users: int = 50
     session_days: int = 30
+    # Requests a minute (public mode, ratelimit.py): sign-in per address; API
+    # calls per session, per address, and per address without a session.
+    rate_limit_signin: int = 10
+    rate_limit_session: int = 300
+    rate_limit_address: int = 600
+    rate_limit_anonymous: int = 60
     # Who runs this service, for the privacy policy and terms pages (shown
     # to anyone, signed in or not).
     operator_name: str = ""
@@ -56,6 +62,9 @@ class Settings(BaseSettings):
     # (0 = always research). The local workspace's default; others start at 7
     # and change it in Settings.
     ai_reuse_days: int = 7
+    # How many package lookups one scan runs at a time (registries,
+    # endoflife.date, GitHub).
+    lookup_concurrency: int = 6
     # How many scans run at once (scan_queue.py). In the public mode a
     # workspace runs one at a time, taking turns with the others.
     scan_workers: int = 2

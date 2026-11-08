@@ -15,6 +15,7 @@ from .api.admin import router as admin_router
 from .api.routes import router
 from .api.workspaces import router as workspaces_router
 from .auth import CsrfMiddleware
+from .ratelimit import RateLimitMiddleware
 from .auth import router as auth_router
 from .config import get_settings
 
@@ -49,6 +50,8 @@ app.add_middleware(
 )
 # public mode: data-changing requests must prove they came from our own UI
 app.add_middleware(CsrfMiddleware)
+# public mode: added last, so it runs first and turns floods away cheaply
+app.add_middleware(RateLimitMiddleware)
 
 @app.exception_handler(limits.LimitError)
 async def limit_reached(request: Request, exc: limits.LimitError) -> JSONResponse:
