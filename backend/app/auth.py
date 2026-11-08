@@ -62,6 +62,14 @@ class Principal:
             return True
         return any(w.id == (workspace_id or LOCAL_WORKSPACE_ID) for w in self.workspaces)
 
+    def role_in(self, workspace_id: str | None) -> str | None:
+        """The caller's role in a workspace (None if not a member). The local
+        mode's single user owns everything."""
+        if not get_settings().public_mode():
+            return "owner"
+        ws = workspace_id or LOCAL_WORKSPACE_ID
+        return next((w.role for w in self.workspaces if w.id == ws), None)
+
 
 def session_cookie_name() -> str:
     return "__Host-pt_session" if get_settings().https() else "pt_session"

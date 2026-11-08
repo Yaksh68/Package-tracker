@@ -18,6 +18,8 @@ from . import crypto
 from .config import get_settings
 from .db import is_postgres, session
 from .db_models import (
+    AuditEventRow,
+    InviteRow,
     MembershipRow,
     ScanRunRow,
     SecretRow,
@@ -227,6 +229,197 @@ def add_member(workspace_id: str, user_id: str, role: str) -> None:
         ).on_conflict_do_nothing())
 
 
+def get_workspace(workspace_id: str) -> Workspace | None:
+    with session() as s:
+        w = s.get(WorkspaceRow, workspace_id)
+        return Workspace(id=w.id, name=w.name, personal=w.personal) if w else None
+
+
+def workspace_creator(workspace_id: str) -> str | None:
+    with session() as s:
+        w = s.get(WorkspaceRow, workspace_id)
+        return w.created_by if w else None
+
+
+def create_workspace(name: str, owner_id: str) -> Workspace:
+    """A team workspace, with its creator as Owner."""
+    now = _now()
+    with session() as s:
+        ws = WorkspaceRow(id=uuid.uuid4().hex, name=name, personal=False, created_by=owner_id,
+                          created_at=now)
+        s.add(ws)
+        s.flush()
+        s.add(MembershipRow(workspace_id=ws.id, user_id=owner_id, role="owner", created_at=now))
+        return Workspace(id=ws.id, name=ws.name, personal=False, role="owner")
+
+
+def rename_workspace(workspace_id: str, name: str) -> None:
+    with session() as s:
+        s.execute(update(WorkspaceRow).where(WorkspaceRow.id == workspace_id).values(name=name))
+
+
+def workspace_members(workspace_id: str) -> list[dict]:
+    with session() as s:
+        rows = s.execute(
+            select(MembershipRow, UserRow).join(UserRow, UserRow.id == MembershipRow.user_id)
+            .where(MembershipRow.workspace_id == workspace_id)
+            .order_by(MembershipRow.created_at)
+        ).all()
+        return [{"user_id": u.id, "login": u.login, "name": u.name, "avatar_url": u.avatar_url,
+                 "role": m.role, "joined_at": _utc(m.created_at).isoformat()} for m, u in rows]
+
+
+def owner_count(workspace_id: str) -> int:
+    with session() as s:
+        return s.scalar(select(func.count()).select_from(MembershipRow).where(
+            MembershipRow.workspace_id == workspace_id, MembershipRow.role == "owner")) or 0
+
+
+def set_role(workspace_id: str, user_id: str, role: str) -> None:
+    with session() as s:
+        s.execute(update(MembershipRow).where(
+            MembershipRow.workspace_id == workspace_id, MembershipRow.user_id == user_id,
+        ).values(role=role))
+
+
+def remove_member(workspace_id: str, user_id: str) -> bool:
+    with session() as s:
+        return bool(s.execute(delete(MembershipRow).where(
+            MembershipRow.workspace_id == workspace_id, MembershipRow.user_id == user_id)).rowcount)
+
+
+def all_users() -> list[dict]:
+    """Every signed-up user, for the platform admin (newest first)."""
+    with session() as s:
+        counts = dict(s.execute(select(MembershipRow.user_id, func.count())
+                                .group_by(MembershipRow.user_id)).all())
+        rows = s.scalars(select(UserRow).where(UserRow.github_id.is_not(None))
+                         .order_by(UserRow.created_at.desc())).all()
+        return [{**_user(r).model_dump(mode="json"), "workspaces": counts.get(r.id, 0)} for r in rows]
+
+
+def all_workspaces() -> list[dict]:
+    """Every workspace with its member count, for the platform admin."""
+    with session() as s:
+        counts = dict(s.execute(select(MembershipRow.workspace_id, func.count())
+                                .group_by(MembershipRow.workspace_id)).all())
+        rows = s.scalars(select(WorkspaceRow).order_by(WorkspaceRow.created_at.desc())).all()
+        return [{"id": w.id, "name": w.name, "personal": w.personal, "created_by": w.created_by,
+                 "created_at": _utc(w.created_at).isoformat(), "members": counts.get(w.id, 0)}
+                for w in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Invites                                                                       #
+# --------------------------------------------------------------------------- #
+INVITE_DAYS = 7
+
+
+class InviteError(ValueError):
+    """The invite can't be used; the message is safe to show. `status` is the
+    HTTP status: 404 (no such invite for you) or 410 (expired or used)."""
+
+    def __init__(self, message: str, status: int = 404) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def _invite(row: InviteRow, workspace_name: str | None = None) -> dict:
+    return {"id": row.id, "workspace_id": row.workspace_id, "workspace_name": workspace_name,
+            "role": row.role, "github_login": row.github_login, "link": row.token_hash is not None,
+            "created_at": _utc(row.created_at).isoformat(),
+            "expires_at": _utc(row.expires_at).isoformat(), "status": row.status}
+
+
+def create_invite(workspace_id: str, role: str, *, by: str, github_login: str | None = None
+                  ) -> tuple[dict, str | None]:
+    """A login invite (github_login set) or a one-time link (returns its token,
+    which is shown once and stored only as a hash)."""
+    now = _now()
+    token = None if github_login else _secrets.token_urlsafe(32)
+    with session() as s:
+        row = InviteRow(id=uuid.uuid4().hex, workspace_id=workspace_id, role=role,
+                        github_login=github_login.strip().lower() if github_login else None,
+                        token_hash=_hash(token) if token else None, created_by=by,
+                        created_at=now, expires_at=now + timedelta(days=INVITE_DAYS),
+                        status="pending")
+        s.add(row)
+        s.flush()
+        return _invite(row), token
+
+
+def _pending(q, now):
+    return q.where(InviteRow.status == "pending", InviteRow.expires_at > now)
+
+
+def workspace_invites(workspace_id: str) -> list[dict]:
+    """The workspace's open invites (pending, not expired)."""
+    with session() as s:
+        rows = s.scalars(_pending(select(InviteRow).where(InviteRow.workspace_id == workspace_id),
+                                  _now()).order_by(InviteRow.created_at.desc())).all()
+        return [_invite(r) for r in rows]
+
+
+def invites_for_login(login: str) -> list[dict]:
+    """Open invites addressed to this GitHub login, with workspace names."""
+    with session() as s:
+        rows = s.execute(_pending(
+            select(InviteRow, WorkspaceRow.name).join(WorkspaceRow, WorkspaceRow.id == InviteRow.workspace_id)
+            .where(InviteRow.github_login == login.lower()), _now())).all()
+        return [_invite(r, name) for r, name in rows]
+
+
+def revoke_invite(workspace_id: str, invite_id: str) -> bool:
+    with session() as s:
+        return bool(s.execute(update(InviteRow).where(
+            InviteRow.id == invite_id, InviteRow.workspace_id == workspace_id,
+            InviteRow.status == "pending").values(status="revoked", responded_at=_now())).rowcount)
+
+
+def _join(s, row: InviteRow, user: User) -> None:
+    """Add the user with the invite's role; an existing member keeps the
+    higher of the two roles."""
+    from .rbac import rank  # (rbac imports auth, which imports this module)
+    m = s.get(MembershipRow, (row.workspace_id, user.id))
+    if m is None:
+        s.add(MembershipRow(workspace_id=row.workspace_id, user_id=user.id, role=row.role,
+                            created_at=_now()))
+    elif rank(row.role) > rank(m.role):
+        m.role = row.role
+
+
+def respond_to_invite(invite_id: str, user: User, *, accept: bool) -> dict:
+    """Accept or decline a login invite addressed to `user`. Returns the invite."""
+    now = _now()
+    with session() as s:
+        row = s.get(InviteRow, invite_id, with_for_update=True)
+        if row is None or row.github_login is None or row.github_login != user.login.lower():
+            raise InviteError("invite not found")
+        if row.status != "pending" or _utc(row.expires_at) <= now:
+            raise InviteError("this invite has expired or was already used", 410)
+        if accept:
+            _join(s, row, user)
+        row.status = "accepted" if accept else "declined"
+        row.responded_by, row.responded_at = user.id, now
+        return _invite(row)
+
+
+def accept_invite_link(token: str, user: User) -> dict:
+    """Use a one-time link: join its workspace with its role. Single use."""
+    now = _now()
+    with session() as s:
+        row = s.scalar(select(InviteRow).where(InviteRow.token_hash == _hash(token))
+                       .with_for_update())
+        if row is None:
+            raise InviteError("invite not found")
+        if row.status != "pending" or _utc(row.expires_at) <= now:
+            raise InviteError("this invite link has expired or was already used", 410)
+        _join(s, row, user)
+        row.status = "accepted"
+        row.responded_by, row.responded_at = user.id, now
+        return _invite(row)
+
+
 def personal_workspace_ids(user_id: str) -> list[str]:
     with session() as s:
         return list(s.scalars(select(WorkspaceRow.id).where(
@@ -234,12 +427,13 @@ def personal_workspace_ids(user_id: str) -> list[str]:
 
 
 def delete_workspace(workspace_id: str) -> None:
-    """Delete a workspace's own rows: settings, secrets and memberships
-    cascade, plus its analytics rows. The caller deletes its repos (and their
-    snapshots and uploads) first."""
+    """Delete a workspace's own rows: settings, secrets, memberships and
+    invites cascade, plus its analytics and audit rows. The caller deletes its
+    repos (and their snapshots and uploads) first."""
     with session() as s:
         s.execute(delete(ScanRunRow).where(ScanRunRow.workspace_id == workspace_id))
         s.execute(delete(UsageEventRow).where(UsageEventRow.workspace_id == workspace_id))
+        s.execute(delete(AuditEventRow).where(AuditEventRow.workspace_id == workspace_id))
         s.execute(delete(WorkspaceRow).where(WorkspaceRow.id == workspace_id))
 
 

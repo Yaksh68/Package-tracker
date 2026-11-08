@@ -10,7 +10,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import accounts, crypto, db, scheduler, storage
+from .api.admin import router as admin_router
 from .api.routes import router
+from .api.workspaces import router as workspaces_router
 from .auth import CsrfMiddleware
 from .auth import router as auth_router
 
@@ -45,8 +47,10 @@ app.add_middleware(
 # public mode: data-changing requests must prove they came from our own UI
 app.add_middleware(CsrfMiddleware)
 
-app.include_router(auth_router)
-app.include_router(router)
+app.include_router(auth_router)        # sign-in: public by design
+app.include_router(router)             # every route below checks rbac.ROUTE_PERMS
+app.include_router(workspaces_router)
+app.include_router(admin_router)
 
 
 @app.get("/api/health")

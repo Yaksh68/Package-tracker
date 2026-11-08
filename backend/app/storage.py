@@ -127,6 +127,13 @@ def load_repos(workspace_id: str | None = None) -> list[Repo]:
         return [_repo_from_row(r, branches.get(r.id, [])) for r in rows]
 
 
+def repo_counts_by_workspace() -> dict[str, int]:
+    """How many repos each workspace has (the platform admin's overview)."""
+    ws = func.coalesce(RepoRow.workspace_id, LOCAL_WORKSPACE_ID)
+    with session() as s:
+        return dict(s.execute(select(ws, func.count()).group_by(ws)).all())
+
+
 def encrypt_plaintext_tokens() -> int:
     """Encrypt any per-repo token still stored in plain text (rows written
     before encryption at rest). Run at startup; returns how many changed."""

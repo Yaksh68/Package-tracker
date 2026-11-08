@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import storage, uploads
+from . import audit, storage, uploads
 from .models import Repo
 from .pipeline import run_scan
 
@@ -61,6 +61,8 @@ async def _scan_job(repo_id: str, branch: str) -> None:
     if repo.source == "upload" and not uploads.has_upload(repo_id, branch):
         return  # nothing to scan until a zip is uploaded for this version
     log.info("scheduled scan starting for %s @ %s", repo_id, branch)
+    audit.record("scan.scheduled", workspace_id=repo.workspace_id, actor_kind="scheduler",
+                 target_type="repo", target_id=repo.id, branch=branch)
     await run_scan(repo, branch, trigger="scheduled")
 
 

@@ -3,10 +3,11 @@ and secrets, and the signed-in account.
 
 Every route resolves the caller (auth.get_principal). In the local mode
 that's the built-in local user and workspace; in the public mode it's the
-signed-in user and their active workspace. Repos are scoped to workspaces:
-a repo in a workspace the caller isn't in is a 404, so its existence never
-leaks. Roles and permissions arrive in phase 2b; until then every member of
-a workspace can do everything in it.
+signed-in user and their active workspace. Each route's permission is
+declared in rbac.ROUTE_PERMS and checked by the router's `authorize`
+dependency before the handler runs. A repo in a workspace the caller isn't
+in is a 404, so its existence never leaks. Mutating routes also write an
+audit entry (audit.py).
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from .. import accounts, scanlog, scheduler, settings_store, storage, uploads
+from .. import accounts, audit, rbac, scanlog, scheduler, settings_store, storage, uploads
 from .. import flags as flags_mod
 from ..auth import Principal, get_principal, session_cookie_name
 from ..config import get_settings
@@ -30,13 +31,20 @@ from ..models import (
     UploadRepoCreate,
     upload_version,
 )
-from ..pipeline import clear_repo_state, get_status, is_scanning, run_scan  # noqa: F401 - run_scan re-exported
+from ..pipeline import get_status, is_scanning, run_scan  # noqa: F401 - run_scan re-exported
+from .common import delete_user_everything, forget_repo
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(rbac.authorize)])
 
 
 def _event(me: Principal, event: str, **meta) -> None:
     accounts.record_event(event, workspace_id=me.workspace_id, user_id=me.user.id, **meta)
+
+
+def _audit(me: Principal, action: str, *, workspace_id: str | None = None,
+           target_type: str | None = None, target_id: str | None = None, **details) -> None:
+    audit.record(action, workspace_id=workspace_id or me.workspace_id, actor=me,
+                 target_type=target_type, target_id=target_id, **details)
 
 
 # --------------------------------------------------------------------------- #
@@ -49,6 +57,8 @@ def me_route(me: Principal = Depends(get_principal)) -> dict:
         "user": me.user.model_dump(mode="json"),
         "workspace_id": me.workspace_id,
         "role": me.role,
+        # what the caller may do in the active workspace (the UI disables the rest)
+        "permissions": rbac.permissions(me.role),
         "workspaces": [w.model_dump() for w in me.workspaces],
     }
 
@@ -59,15 +69,12 @@ def delete_account(me: Principal = Depends(get_principal)) -> Response:
     uploads, settings, secrets) and their analytics rows."""
     if not get_settings().public_mode():
         raise HTTPException(400, "there are no accounts to delete in the local mode")
-    personal = accounts.personal_workspace_ids(me.user.id)
-    repos = [r for ws in personal for r in storage.load_repos(ws)]
-    if any(is_scanning(r.id, b) for r in repos for b in r.branches):
-        raise HTTPException(409, "a scan is in progress; try again once it finishes")
-    for r in repos:
-        _forget_repo(r.id)
-    for ws in personal:
-        accounts.delete_workspace(ws)
-    accounts.delete_user(me.user.id)  # sessions, memberships and activity cascade
+    for w in me.workspaces:
+        if (not w.personal and w.role == "owner" and accounts.owner_count(w.id) == 1
+                and len(accounts.workspace_members(w.id)) > 1):
+            raise HTTPException(409, f"you're the last Owner of '{w.name}', which has other "
+                                     "members: make someone else Owner first")
+    delete_user_everything(me.user.id)  # sessions, memberships and activity cascade
     resp = Response(status_code=204)
     resp.delete_cookie(session_cookie_name(), path="/")
     return resp
@@ -76,12 +83,20 @@ def delete_account(me: Principal = Depends(get_principal)) -> Response:
 # --------------------------------------------------------------------------- #
 # runtime settings and secrets (per workspace)                                  #
 # --------------------------------------------------------------------------- #
+def _secrets_view(me: Principal) -> dict:
+    """Which secrets are set, with hints, for roles that manage secrets; just
+    set / not set for everyone else."""
+    hints = accounts.secret_hints(me.workspace_id)
+    if rbac.can(me.role, rbac.Perm.SECRETS):
+        return hints
+    return {name: {"set": h["set"], "hint": None, "updated_at": None} for name, h in hints.items()}
+
+
 @router.get("/settings")
 def get_settings_route(me: Principal = Depends(get_principal)) -> dict:
     """The workspace's settings, plus whether each secret is set (and its
-    hint). Secret values are never returned."""
-    return {**settings_store.get_runtime_settings(me.workspace_id),
-            "secrets": accounts.secret_hints(me.workspace_id)}
+    hint, for Admins and Owners). Secret values are never returned."""
+    return {**settings_store.get_runtime_settings(me.workspace_id), "secrets": _secrets_view(me)}
 
 
 @router.put("/settings")
@@ -90,9 +105,11 @@ def update_settings_route(patch: dict, me: Principal = Depends(get_principal)) -
         out = settings_store.update_runtime_settings(patch, me.workspace_id)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
+    changed = {k: out[k] for k in patch if k in out}
+    _audit(me, "settings.update", target_type="workspace", target_id=me.workspace_id, **changed)
     if "use_enrichment_agent" in patch:
         _event(me, "ai_toggle", on=bool(out["use_enrichment_agent"]))
-    return {**out, "secrets": accounts.secret_hints(me.workspace_id)}
+    return {**out, "secrets": _secrets_view(me)}
 
 
 class SecretValue(BaseModel):
@@ -111,6 +128,7 @@ def set_secret_route(name: str, body: SecretValue, me: Principal = Depends(get_p
     the response, like every later read, carries only a hint."""
     hint = accounts.set_secret(me.workspace_id, _secret_name(name), body.value.strip(),
                                by=me.user.id)
+    _audit(me, "secret.set", target_type="secret", target_id=name)  # the name only, never the value
     _event(me, "secret_set", name=name)
     return {"name": name, "set": True, "hint": hint}
 
@@ -118,6 +136,7 @@ def set_secret_route(name: str, body: SecretValue, me: Principal = Depends(get_p
 @router.delete("/secrets/{name}", status_code=204)
 def delete_secret_route(name: str, me: Principal = Depends(get_principal)) -> Response:
     if accounts.delete_secret(me.workspace_id, _secret_name(name)):
+        _audit(me, "secret.remove", target_type="secret", target_id=name)
         _event(me, "secret_removed", name=name)
     return Response(status_code=204)
 
@@ -151,16 +170,6 @@ def _new_repo_id(slug_source: str) -> str:
     if get_settings().public_mode():
         return storage.new_repo_id()
     return storage.slugify_repo_id(slug_source)
-
-
-def _forget_repo(repo_id: str) -> None:
-    """Delete a repo and everything kept about it: history, schedule, uploads,
-    and in-memory scan state."""
-    storage.delete_repo(repo_id)
-    scheduler.unsync_repo(repo_id)      # stop every branch's interval job
-    uploads.delete(repo_id)             # uploaded zips, if any
-    clear_repo_state(repo_id)           # drop in-memory scan status + lock (all branches)
-    scanlog.clear_repo(repo_id)         # drop in-memory activity trace (all branches)
 
 
 # --------------------------------------------------------------------------- #
@@ -221,6 +230,8 @@ async def create_repo(body: RepoCreate, me: Principal = Depends(get_principal)) 
     for branch in repo.branches:
         # first scan starts immediately, per branch
         scheduler.trigger_now(repo, branch, trigger="initial")
+    _audit(me, "repo.create", target_type="repo", target_id=repo.id, url=repo.url,
+           branches=repo.branches, token_set=bool(repo.token_override))
     _event(me, "repo_added", source="git", branches=len(repo.branches))
     return _mask(repo)
 
@@ -257,6 +268,11 @@ def update_repo(repo_id: str, body: RepoUpdate, me: Principal = Depends(get_prin
     if reflag:
         for branch in repo.branches:
             _reflag_latest(repo, branch)
+    # what changed, with values for everything but the token
+    changes = {k: ("set" if v else "removed") if k == "token_override" else v
+               for k, v in body.model_dump(mode="json", exclude_unset=True).items()}
+    _audit(me, "repo.update", workspace_id=repo.workspace_id, target_type="repo",
+           target_id=repo.id, **changes)
     if "release_date" in updates:
         _event(me, "release_date_edit")
     if ignored_changed:
@@ -269,7 +285,9 @@ def delete_repo(repo_id: str, me: Principal = Depends(get_principal)) -> Respons
     repo = _require_repo(repo_id, me)
     if any(is_scanning(repo_id, b) for b in repo.branches):
         raise HTTPException(409, "a scan is in progress; try again once it finishes")
-    _forget_repo(repo_id)
+    forget_repo(repo_id)
+    _audit(me, "repo.delete", workspace_id=repo.workspace_id, target_type="repo",
+           target_id=repo.id, url=repo.url)
     _event(me, "repo_deleted")
     return Response(status_code=204)
 
@@ -303,6 +321,8 @@ async def scan_now(repo_id: str, branch: str = Query(...),
     if repo.source == "upload" and not uploads.has_upload(repo_id, branch):
         raise HTTPException(400, f"no zip uploaded for version '{branch}' yet")
     scheduler.trigger_now(repo, branch, trigger="manual")
+    _audit(me, "scan.manual", workspace_id=repo.workspace_id, target_type="repo",
+           target_id=repo.id, branch=branch)
     _event(me, "manual_scan")
     return {"status": "queued", "repo_id": repo_id, "branch": branch}
 
@@ -353,6 +373,8 @@ async def create_upload_repo(file: UploadFile = File(...), meta: str = Form(...)
     storage.upsert_repo(repo)
     scheduler.sync_repo(repo)
     scheduler.trigger_now(repo, version, trigger="upload")
+    _audit(me, "repo.create", target_type="repo", target_id=repo.id, source="upload",
+           version=version)
     _event(me, "repo_added", source="upload")
     _event(me, "zip_upload")
     return _mask(repo)
@@ -377,6 +399,8 @@ async def upload_version_zip(
     storage.upsert_repo(repo)
     scheduler.sync_repo(repo)
     scheduler.trigger_now(repo, version, trigger="upload")
+    _audit(me, "zip.upload", workspace_id=repo.workspace_id, target_type="repo",
+           target_id=repo.id, version=version)
     _event(me, "zip_upload")
     return _mask(repo)
 
