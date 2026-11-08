@@ -87,7 +87,11 @@ packages-tracker/
 │       ├── audit.py              # the per-workspace audit log
 │       ├── scan_context.py       # the workspace and credentials of the running scan
 │       ├── pipeline.py           # orchestrates a scan; in-memory scan state
-│       ├── scheduler.py          # APScheduler: per-repo interval jobs
+│       ├── scan_queue.py         # the scan queue: workers, turns, merging
+│       ├── scheduler.py          # APScheduler: per-repo interval jobs, daily upkeep
+│       ├── limits.py             # per-workspace limits and their checks
+│       ├── housekeeping.py       # retention, pausing inactive workspaces
+│       ├── ratelimit.py          # in-memory rate limits (public mode)
 │       ├── main.py               # FastAPI app + lifespan
 │       ├── api/routes.py         # REST: account, settings, secrets, repos, scans
 │       ├── api/workspaces.py     # REST: workspaces, members, invites, audit log
@@ -259,8 +263,9 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   - Any other workspace starts with AI research off and no provider.
 - `update_runtime_settings(patch, workspace_id=None)` persists an allowlisted
   set: `use_enrichment_agent`, `use_extraction_agent`, `ai_provider`, `ai_model`,
-  `ai_base_url`, `search_provider`. It raises `ValueError` for a bad value (the
-  route returns 422). Keys and tokens aren't settings: see `accounts.set_secret`.
+  `ai_base_url`, `search_provider`, `ai_reuse_days` (0-90). It raises `ValueError`
+  for a bad value (the route returns 422). The `limits` and pause keys in
+  `workspace_settings` are outside this allowlist on purpose. Keys and tokens aren't settings: see `accounts.set_secret`.
 
 ### `accounts.py`, `auth.py`, `crypto.py`, `scan_context.py` (Phase 2a)
 - **Modes.** `AUTH_MODE=none` runs every request as the built-in `local` user in
@@ -379,8 +384,42 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
 
   A failed write of that row is only logged.
 
+### `scan_queue.py` (Phase 4)
+- Every scan waits here: `SCAN_WORKERS` worker tasks take jobs. In the public
+  mode a workspace runs one scan at a time and workspaces take turns (round
+  robin); the local mode may use every worker.
+- `enqueue(repo, branch, trigger)` returns False when that branch is already
+  queued or running (the request is merged). `position()` (1 = next) feeds
+  `queue_position` in the scan status and the repo list. `cancel_repo()` drops a
+  deleted repo's waiting scans (callable from any thread).
+- Everything runs on the event loop's thread; thread-pool handlers only read
+  `_positions`, a dict that's replaced, never mutated. One queue per event
+  loop (tests run several). The queue is in memory: a restart drops it.
+- A worker re-reads the repo before scanning (it may have changed or gone) and
+  passes `queued_at`, which `scan_runs` records.
+
+### `limits.py`, `housekeeping.py`, `ratelimit.py` (Phase 4)
+- **`limits.py`**: `DEFAULTS` overlaid with the platform's values
+  (`app_settings` "limits") and then a workspace's overrides
+  (`workspace_settings` "limits"); only the platform admin sets either.
+  `check_count` / `check_max` / `check_min` / `refuse` raise `LimitError` (main.py
+  turns it into the response) and record a `limit_hit` usage event. `usage()`
+  feeds the Settings card. Off in the local mode (`value()` is None).
+- **`housekeeping.py`**: `prune_history()` (the daily upkeep job) keeps each
+  branch's newest `snapshots_per_branch` scans via `storage.prune_snapshots`.
+  `inactive(ws)` = no member who isn't disabled seen in 30 days; `_scan_job`
+  then skips the scan and `mark_paused` records it once. `resume_for(user)`
+  runs on a member's first request of the day (`auth.get_principal`, via
+  `touch_activity`'s return value) and the scheduler re-syncs those
+  workspaces so overdue branches catch up. `pause_notice()` feeds `/api/me`.
+- **`ratelimit.py`**: sliding windows in memory (sign-in per address; API per
+  session plus a per-address ceiling; anonymous per address), public mode
+  only; 429 with `Retry-After`. The tests reset it per test.
+
 ### `scheduler.py` (APScheduler, in FastAPI lifespan)
-- `start`/`shutdown`; `_scan_job(repo_id, branch)` → `run_scan`.
+- `start`/`shutdown`; `_scan_job(repo_id, branch)` queues a scheduled scan
+  (skipping a busy branch, and an inactive workspace's). `start` also adds the
+  daily `upkeep` job (retention), and `sync_all` only reconciles `scan:` jobs.
 - `sync_repo(repo, *, scanning_now=())` — adds/replaces one interval job **per branch**
   (`_job_id(repo_id, branch)` = `scan:<repo_id>::<branch>`), and removes jobs for
   branches no longer in `repo.branches` (diffs against the `scan:<repo_id>::`
@@ -394,7 +433,7 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   - `_scan_job` skips a branch that's already scanning, without an audit entry.
 - `unsync_repo(repo_id)` — removes every branch's job for that repo.
 - `sync_all()` (reconcile all repos' jobs), `trigger_now(repo, branch)`
-  (fire-and-forget task for one branch).
+  (queue a scan for one branch; False when merged), `resync_workspaces(ids)`.
 
 ### `main.py`
 - `lifespan` — runs `db.upgrade()` (pending migrations), re-creates the local
@@ -566,13 +605,19 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   → `Enrichment`; records the endoflife match/citation **even when there's no EOL
   date** (dates stay structured-only). `_apply_github`, `_summarize`, `_conf_rank`.
 - **`enrich(packages, *, today)`** — dedups by `Package.key`, runs the structured
-  pass for every unique package (no cache), then the AI pass if enabled.
+  pass for every unique package (no cache), `LOOKUP_CONCURRENCY` at a time with
+  the input order kept, then the AI pass if enabled.
 - **AI research pass:** `_needs_ai(e, stale_years)` (candidate selection —
   unknown / low-confidence / stale-no-endoflife), `_chunk`, `_signal_line`
   (feeds the model our structured data), `_run_ai_batch` (WebSearch/WebFetch,
   JSON → `AiVerdictBatch`, retry, degrade), `_merge_ai` (**never sets dates**;
   adopts verdict/successor/summary, bumps confidence, dedups sources), `_ai_pass`
   (batches candidates, merges, logs per-package verdicts).
+- **AI verdict reuse** (`_reuse_recent`, before batching): an `ai_result` (the
+  AI's own answer, stored on each finding) for the same ecosystem:name:version
+  from the workspace's scans of the last `ai_reuse_days` days is merged again
+  instead of researched; `ai_reused_from` names the scan. Never across
+  workspaces.
 
 ### `agents/transport.py` (the one place that talks to the model)
 - **`run_text_agent(prompt, *, cwd, allowed_tools, append_system, mcp_config,
@@ -721,14 +766,19 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   - `Login` — Sign in with GitHub, the meaning of each `?error=` code, and the
     "sign-ups are full" page.
   - `Settings` — AI research (provider, key, Test connection, model, web
-    search) and the git tokens. Keys are write-only: only a hint shows. Read
-    only below Admin.
+    search, how long findings are reused) and the git tokens. Keys are
+    write-only: only a hint shows. Read only below Admin. In the public mode a
+    "Usage and limits" card shows the workspace against its limits.
   - `Members` — members and roles, invites by login or one-time link, pending
     invites, and rename, transfer, delete and leave. A personal workspace
     shows how to create a team instead.
   - `Audit` — the workspace's log, paged by "Load older entries".
-  - `Admin` — users and workspaces, for platform admins only (a 404 page for
-    everyone else).
+  - `Admin` — users, workspaces (the drawer has that workspace's own limits)
+    and the platform's limits, for platform admins only (a 404 page for
+    everyone else, and in the local mode).
+  - `RepoList` also shows `PauseNotice` when the workspace's scheduled scans
+    are paused or were until recently (`/api/me` `scans_paused`), and the
+    status pill shows a queued scan's place in line.
   - `Invite` — accepts a one-time link (`/invite/:token`) and switches to
     that workspace.
   - `Legal` — the privacy policy and terms, drafts for the operator to
@@ -829,6 +879,12 @@ Phase 3 added:
   page, and a Viewer's disabled controls. It has no testing-library: React's
   `act` and `createRoot` do the rendering. The first render of the whole app
   is slow in jsdom, so it raises the test timeout.
+
+Phase 4 added: `test_scan_queue.py` (turns, the per-workspace cap, merging,
+cancelling), `test_limits.py` (each limit, overrides, the admin endpoints),
+`test_housekeeping.py` (retention, pausing, resuming), `test_ai_reuse.py`,
+`test_ratelimit.py`, and a concurrency test for the lookups. Frontend:
+`ScanStatusPill.test.ts`.
 
 Each test gets a throwaway SQLite DB (schema from the ORM models);
 `TEST_DATABASE_URL=postgresql+psycopg://…` runs them on Postgres instead (via
