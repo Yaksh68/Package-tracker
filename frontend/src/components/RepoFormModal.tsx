@@ -28,6 +28,7 @@ import {
   textToTags,
   type RepoFormValues,
 } from "../lib/repoForm";
+import { repoName } from "../format";
 import type { Repo, RepoCreate, RepoUpdate, UploadRepoMeta } from "../types";
 
 const { Text } = Typography;
@@ -187,7 +188,7 @@ export function RepoFormModal({
 
   return (
     <Modal
-      title={editing ? `Edit ${editing.id}` : "Add repository"}
+      title={editing ? `Edit ${repoName(editing)}` : "Add repository"}
       open={open}
       width={640}
       onCancel={onCancel}
@@ -341,12 +342,12 @@ export function RepoFormModal({
                     <Form.Item
                       name="token"
                       label="Repository token"
-                      tooltip="Only needed when the token in .env can't reach this repository. Never shown again after saving."
+                      tooltip="Only needed when the workspace's token (Settings, Repository access) can't reach this repository. Never shown again after saving."
                       extra={hasStoredToken ? "A token is saved. Leave blank to keep it." : undefined}
                       style={hasStoredToken ? { marginBottom: 8 } : undefined}
                     >
                       <Input.Password
-                        placeholder={hasStoredToken ? "Type a new token to replace it" : "Leave blank to use the token from .env"}
+                        placeholder={hasStoredToken ? "Type a new token to replace it" : "Leave blank to use the workspace's token"}
                         autoComplete="new-password"
                         disabled={!!removeToken}
                       />

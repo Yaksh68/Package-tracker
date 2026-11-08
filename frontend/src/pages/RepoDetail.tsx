@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { App, Breadcrumb, Button, Result, Select, Skeleton, Space, Typography } from "antd";
+import { App, Breadcrumb, Button, Result, Select, Skeleton, Space, Tag, Tooltip, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, errorMessage, isNotFound } from "../api";
-import { fmtDate, fmtDateTime, fmtRelative } from "../format";
+import { fmtDate, fmtDateTime, fmtRelative, repoName } from "../format";
+import { useSession } from "../session";
 import { AiStatusTag } from "../components/AiStatusTag";
 import { CitationsDrawer } from "../components/CitationsDrawer";
 import { ComponentTable } from "../components/ComponentTable";
@@ -19,6 +20,7 @@ export function RepoDetail() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const { message } = App.useApp();
+  const { me, can, why, isPublic } = useSession();
   // a snapshot the user picked; otherwise the page follows the latest one
   const [pinnedTs, setPinnedTs] = useState<string>();
   const [selected, setSelected] = useState<Component | null>(null);
@@ -115,15 +117,20 @@ export function RepoDetail() {
   if (!repo) return <Skeleton active paragraph={{ rows: 8 }} />;
 
   const lastScan = repo.last_scan_by_branch?.[branch ?? ""];
+  // opened from a link while another workspace is active: say whose it is
+  const otherWorkspace = isPublic && repo.workspace_id && repo.workspace_id !== me.workspace_id
+    ? me.workspaces.find((w) => w.id === repo.workspace_id)
+    : undefined;
 
   return (
     <div>
       <Breadcrumb
         style={{ marginBottom: 12 }}
-        items={[{ title: <Link to="/">Repositories</Link> }, { title: id }]}
+        items={[{ title: <Link to="/">Repositories</Link> }, { title: repoName(repo) }]}
       />
-      <Typography.Title level={3} style={{ margin: "0 0 4px" }}>{id}</Typography.Title>
+      <Typography.Title level={3} style={{ margin: "0 0 4px" }}>{repoName(repo)}</Typography.Title>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+        {otherWorkspace && <Tag style={{ marginRight: 8 }}>in {otherWorkspace.name}</Tag>}
         {repo.release_date ? `Release ${fmtDate(repo.release_date)}` : "No release date set"}
         {" · "}
         <span title={fmtDateTime(lastScan)}>{lastScan ? `scanned ${fmtRelative(lastScan)}` : "not scanned yet"}</span>
@@ -150,14 +157,16 @@ export function RepoDetail() {
           {ts && branch && (
             <Button href={api.reportCsvUrl(id, branch, ts)} download>Download CSV</Button>
           )}
-          <Button
-            type="primary"
-            loading={scanning}
-            disabled={scanning || !branch}
-            onClick={() => scanMut.mutate()}
-          >
-            {scanning ? "Scanning…" : "Scan now"}
-          </Button>
+          <Tooltip title={why("scan", repo.workspace_id)}>
+            <Button
+              type="primary"
+              loading={scanning}
+              disabled={scanning || !branch || !can("scan", repo.workspace_id)}
+              onClick={() => scanMut.mutate()}
+            >
+              {scanning ? "Scanning…" : "Scan now"}
+            </Button>
+          </Tooltip>
         </Space>
       </Space>
 
@@ -181,7 +190,9 @@ export function RepoDetail() {
           snapshots.length === 0
             ? scanning
               ? "The first scan is running — results appear here when it finishes."
-              : "Not scanned yet. Use Scan now to check this branch."
+              : can("scan", repo.workspace_id)
+                ? "Not scanned yet. Use Scan now to check this branch."
+                : "Not scanned yet."
             : undefined
         }
       />

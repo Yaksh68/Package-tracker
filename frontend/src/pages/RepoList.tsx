@@ -5,9 +5,10 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, errorMessage } from "../api";
 import { FlagCounts } from "../components/FlagBadge";
-import { fmtDate, fmtDateTime, fmtDue, fmtRelative } from "../format";
+import { fmtDate, fmtDateTime, fmtDue, fmtRelative, repoName } from "../format";
 import { RepoFormModal } from "../components/RepoFormModal";
 import { ScanStatusPill } from "../components/ScanStatusPill";
+import { useSession } from "../session";
 import type { BranchInfo, Repo, RepoCreate, RepoUpdate, UploadRepoMeta } from "../types";
 
 const isActive = (s?: string) => s === "running" || s === "queued";
@@ -122,6 +123,7 @@ function cacheRepo(qc: QueryClient, repo: Repo, state: string) {
 export function RepoList() {
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const { can, why } = useSession();
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Repo | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -147,7 +149,7 @@ export function RepoList() {
     // "running", not "idle": the server has already started the first scan for
     // every branch by the time it responds.
     onSuccess: (repo) => {
-      message.success(`Added ${repo.id} — first scan started`);
+      message.success(`Added ${repoName(repo)} — first scan started`);
       cacheRepo(qc, repo, "running");
       qc.invalidateQueries({ queryKey: ["repos"] });
       closeModal();
@@ -158,7 +160,7 @@ export function RepoList() {
   const createUploadMut = useMutation({
     mutationFn: ({ meta, file }: { meta: UploadRepoMeta; file: File }) => api.createUploadRepo(meta, file),
     onSuccess: (repo) => {
-      message.success(`Added ${repo.id} — first scan started`);
+      message.success(`Added ${repoName(repo)} — first scan started`);
       cacheRepo(qc, repo, "running");
       qc.invalidateQueries({ queryKey: ["repos"] });
       closeModal();
@@ -174,12 +176,13 @@ export function RepoList() {
       return repo!;
     },
     onSuccess: (repo, { body, upload }) => {
+      const name = repoName(repo);
       message.success(
         upload
-          ? `Uploaded to ${repo.id} — scan started`
+          ? `Uploaded to ${name} — scan started`
           : "release_date" in body
-            ? `Saved ${repo.id} — results re-checked against the new release date`
-            : `Saved ${repo.id}`,
+            ? `Saved ${name} — results re-checked against the new release date`
+            : `Saved ${name}`,
       );
       if (!upload) cacheRepo(qc, repo, "idle"); // an edit starts no scan
       qc.invalidateQueries({ queryKey: ["repos"] });
@@ -191,14 +194,26 @@ export function RepoList() {
   });
 
   const deleteMut = useMutation({
-    mutationFn: (id: string) => api.deleteRepo(id),
-    onSuccess: (_data, id) => {
-      message.success(`Deleted ${id}`);
-      qc.setQueryData<Repo[]>(["repos"], (old = []) => old.filter((r) => r.id !== id));
+    mutationFn: (repo: Repo) => api.deleteRepo(repo.id),
+    onSuccess: (_data, repo) => {
+      message.success(`Deleted ${repoName(repo)}`);
+      qc.setQueryData<Repo[]>(["repos"], (old = []) => old.filter((r) => r.id !== repo.id));
       qc.invalidateQueries({ queryKey: ["repos"] });
     },
     onError: (e) => message.error(errorMessage(e)),
   });
+
+  const addButton = (
+    <Tooltip title={why("edit")}>
+      <Button
+        type="primary"
+        disabled={!can("edit")}
+        onClick={() => { setEditing(null); setFormError(null); setModalOpen(true); }}
+      >
+        Add repository
+      </Button>
+    </Tooltip>
+  );
 
   return (
     <div>
@@ -206,9 +221,7 @@ export function RepoList() {
         <Typography.Title level={3} style={{ margin: 0 }}>
           Repositories
         </Typography.Title>
-        <Button type="primary" onClick={() => { setEditing(null); setFormError(null); setModalOpen(true); }}>
-          Add repository
-        </Button>
+        {addButton}
       </Space>
 
       {reposQuery.isError ? (
@@ -222,10 +235,8 @@ export function RepoList() {
       ) : isLoading ? (
         <Skeleton active paragraph={{ rows: 6 }} />
       ) : repos.length === 0 ? (
-        <Empty description="No repositories yet — add one to start tracking.">
-          <Button type="primary" onClick={() => { setEditing(null); setFormError(null); setModalOpen(true); }}>
-            Add repository
-          </Button>
+        <Empty description={can("edit") ? "No repositories yet — add one to start tracking." : "No repositories yet."}>
+          {can("edit") && addButton}
         </Empty>
       ) : (
         <Row gutter={[16, 16]}>
@@ -233,25 +244,41 @@ export function RepoList() {
             <Col key={r.id} xs={24} md={12} lg={8}>
               <Card
                 hoverable
-                title={<Link to={`/repos/${r.id}`}>{r.id}</Link>}
+                title={<Link to={`/repos/${r.id}`}>{repoName(r)}</Link>}
                 actions={[
                   <Button key="view" type="text" icon={<EyeOutlined />} onClick={() => navigate(`/repos/${r.id}`)}>
                     View
                   </Button>,
-                  <Button key="edit" type="text" icon={<EditOutlined />} onClick={() => { setEditing(r); setFormError(null); setModalOpen(true); }}>
-                    Edit
-                  </Button>,
+                  <Tooltip key="edit" title={why("edit", r.workspace_id)}>
+                    <Button
+                      type="text"
+                      icon={<EditOutlined />}
+                      disabled={!can("edit", r.workspace_id)}
+                      onClick={() => { setEditing(r); setFormError(null); setModalOpen(true); }}
+                    >
+                      Edit
+                    </Button>
+                  </Tooltip>,
                   <Popconfirm
                     key="del"
                     title="Delete repository"
-                    description={`This removes ${r.id} and the scan history of all its branches.`}
+                    description={`This removes ${repoName(r)} and the scan history of all its branches.`}
                     okText="Delete"
                     okButtonProps={{ danger: true }}
-                    onConfirm={() => deleteMut.mutate(r.id)}
+                    disabled={!can("delete_repo", r.workspace_id)}
+                    onConfirm={() => deleteMut.mutate(r)}
                   >
-                    <Button type="text" danger icon={<DeleteOutlined />} loading={deleteMut.isPending && deleteMut.variables === r.id}>
-                      Delete
-                    </Button>
+                    <Tooltip title={why("delete_repo", r.workspace_id)}>
+                      <Button
+                        type="text"
+                        danger
+                        icon={<DeleteOutlined />}
+                        disabled={!can("delete_repo", r.workspace_id)}
+                        loading={deleteMut.isPending && deleteMut.variables?.id === r.id}
+                      >
+                        Delete
+                      </Button>
+                    </Tooltip>
                   </Popconfirm>,
                 ]}
               >

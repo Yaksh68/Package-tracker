@@ -1,6 +1,6 @@
 # Cloud deployment: public multi-user Packages Tracker (implementation plan)
 
-> **Status:** Phases 0 and 1 are merged (2026-11-07), and so is Phase 2a (2026-11-08). Phase 2b is done on `phase-2b-rbac` (2026-11-08). Each phase ships as its own branch and pull request.
+> **Status:** Phases 0 and 1 are merged (2026-11-07), and so are 2a and 2b (2026-11-08). Phase 3 is done on `phase-3-ui` (2026-11-08). Each phase ships as its own branch and pull request.
 >
 > **Decisions locked (2026-11-07):**
 > 1. **Public multi-user service.** People sign in, work in **workspaces** (teams), and bring their own AI keys.
@@ -348,10 +348,21 @@ Done 2026-11-08: 405 backend tests pass, 33 of them new in `test_rbac.py`.
 - **3.7 Repo pages:**
   - the AI status badge;
   - each scan's AI usage (tokens, searches, estimated cost) in Scan Activity;
-  - the queue position in the scan status pill.
-- **3.8 Admin area:** the users list and limits. The charts come in Phase 6.
+  - the queue position in the scan status pill. **Moved to Phase 4**, which builds the queue.
+- **3.8 Admin area:** the users list and limits. The charts come in Phase 6. **As built:** users and workspaces; limits move to Phase 4 with the limits themselves.
 - **3.9 Privacy policy and terms:** I draft a starting version for you to review.
 - **Tests:** handling of expired sessions, the permission helpers, and Settings form validation. `npm run build` must pass.
+
+**Phase 3 as built (2026-11-08):**
+- Also in this phase:
+  - a public-only HTTP transport for the custom AI base URL and page fetches (`safe_http.py`). Before it, the public mode could have been pointed at internal addresses;
+  - `POST /api/settings/ai-test` for Test connection;
+  - sign-in errors on the app's own `/login` page, and `?next=` to return where you were;
+  - repo names instead of random ids;
+  - a GitHub token that GitHub rejects is dropped for the rest of the scan instead of failing every lookup.
+- A scheduler fix: a new repo was scanned twice within a minute (its first scan, then a catch-up 30 s later). Now its schedule starts one interval after the first scan.
+- Checked in a browser against a seeded public-mode server: signed out, the Owner and platform admin, an Editor and a Viewer. The live sign-in through GitHub still needs the OAuth app.
+- Seen on the way, for Phase 4: package lookups run one package at a time, so a 1,200-package lockfile takes about 20 minutes to scan. The queue and limits should account for that, and the lookups could run a few at a time.
 
 ---
 

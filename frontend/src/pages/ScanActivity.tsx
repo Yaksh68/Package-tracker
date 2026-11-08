@@ -3,10 +3,11 @@ import { Breadcrumb, Button, Card, Checkbox, Empty, Select, Space, Steps, Table,
 import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
+import { AiUsageCard } from "../components/AiUsage";
 import { ScanIssueAlert } from "../components/ScanIssueAlert";
 import { RepoTabs } from "../components/RepoTabs";
 import { ScanStatusPill } from "../components/ScanStatusPill";
-import { fmtSnapshotTs, fmtTime } from "../format";
+import { fmtSnapshotTs, fmtTime, repoName } from "../format";
 import type { LogEntry, ScanIssue } from "../types";
 
 // Must list every stage the pipeline can fail in — a stage missing here has its
@@ -97,10 +98,10 @@ export function ScanActivity() {
         style={{ marginBottom: 12 }}
         items={[
           { title: <Link to="/">Repositories</Link> },
-          { title: <Link to={`/repos/${id}${branch ? `?branch=${encodeURIComponent(branch)}` : ""}`}>{id}</Link> },
+          { title: <Link to={`/repos/${id}${branch ? `?branch=${encodeURIComponent(branch)}` : ""}`}>{repoName(repo, id)}</Link> },
         ]}
       />
-      <Typography.Title level={3} style={{ margin: "0 0 8px" }}>{id}</Typography.Title>
+      <Typography.Title level={3} style={{ margin: "0 0 8px" }}>{repoName(repo, id)}</Typography.Title>
       <RepoTabs id={id} branch={branch} />
       <Space style={{ marginBottom: 16, width: "100%", justifyContent: "space-between" }} wrap>
         <Space size="small">
@@ -126,6 +127,8 @@ export function ScanActivity() {
       <Card style={{ marginBottom: 16 }}>
         <Steps size="small" items={stageSteps(allEntries, log?.state ?? "idle")} />
       </Card>
+
+      <AiUsageCard usage={log?.ai_usage} />
 
       <ScanIssueAlert
         issues={issues}
