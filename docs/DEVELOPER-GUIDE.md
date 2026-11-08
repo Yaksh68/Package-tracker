@@ -77,11 +77,22 @@ packages-tracker/
 │       ├── import_files.py       # one-off importer CLI (data/ → DB)
 │       ├── flags.py              # deterministic flag engine
 │       ├── scanlog.py            # per-scan activity trace (contextvar logger)
-│       ├── settings_store.py     # runtime, UI-editable settings
+│       ├── settings_store.py     # runtime, UI-editable settings, per workspace
+│       ├── git_rules.py          # which repo URLs and branches may reach git
+│       ├── crypto.py             # encryption of stored keys and tokens
+│       ├── accounts.py           # users, sessions, workspaces, members, invites, secrets
+│       ├── auth.py               # Sign in with GitHub, sessions, CSRF, get_principal
+│       ├── rbac.py               # roles, permissions, ROUTE_PERMS, authorize
+│       ├── audit.py              # the per-workspace audit log
+│       ├── scan_context.py       # the workspace and credentials of the running scan
 │       ├── pipeline.py           # orchestrates a scan; in-memory scan state
 │       ├── scheduler.py          # APScheduler: per-repo interval jobs
 │       ├── main.py               # FastAPI app + lifespan
-│       ├── api/routes.py         # REST endpoints
+│       ├── api/routes.py         # REST: account, settings, secrets, repos, scans
+│       ├── api/workspaces.py     # REST: workspaces, members, invites, audit log
+│       ├── api/admin.py          # REST: the platform admin
+│       ├── api/common.py         # deleting a repo, workspace or user with its data
+│       ├── ai/                   # AI providers (Anthropic, OpenAI-compatible), search, pricing
 │       └── agents/
 │           ├── clone.py          # shallow git clone + token injection/redaction
 │           ├── parsers.py        # deterministic manifest parsers
@@ -160,6 +171,11 @@ packages-tracker/
   `app_settings`, `scan_runs` (one fact row per scan attempt, failed ones
   included, for the admin analytics; no FK to `repos`, so usage history outlives
   a deleted repo).
+- Accounts (Phase 2a): `users`, `sessions` (only a SHA-256 of each token),
+  `workspaces`, `memberships` (one role per user per workspace),
+  `workspace_settings`, `secrets` (encrypted), `user_activity_days` and
+  `usage_events`. Phase 2b adds `invites` (a GitHub login, or a link's token
+  hash) and `audit_events`. `repos.workspace_id` has no foreign key.
 - `position` columns preserve list order exactly as the scan produced it.
   Package keys are **not unique per snapshot** (one package pinned in two
   manifests = two rows with the same key), so nothing is keyed on them.
@@ -289,6 +305,49 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
 
   The public mode never uses the server's own tokens.
 
+### `rbac.py`, `audit.py`, `api/workspaces.py`, `api/admin.py` (Phase 2b)
+- **Roles.** `ROLES` = viewer < editor < admin < owner. `ROLE_PERMS` gives each
+  role a strict superset of the one below; `can`, `permissions` and `min_role`
+  read it. `Principal.role_in(workspace_id)` is the caller's role (always
+  `owner` in the local mode).
+- **One table, one check.** `ROUTE_PERMS` maps every `(method, path)` to a
+  `Perm`, `SIGNED_IN` or `PLATFORM_ADMIN`. Each API router has
+  `dependencies=[Depends(rbac.authorize)]`, which runs before the handler:
+  - the role counts in the repo's workspace for `{repo_id}` paths, the named
+    workspace for `{workspace_id}` paths, and the active workspace otherwise;
+  - not a member there: 404. Member without the permission: 403, naming the
+    role needed;
+  - `PLATFORM_ADMIN` routes are a 404 for everyone else;
+  - a route with no `ROUTE_PERMS` entry is a 500. A new route must be added
+    to the table, and `test_every_api_route_declares_a_permission` fails
+    until it is.
+- **Rules a permission can't express** live in `api/workspaces.py`:
+  - only Owners make, change or remove Owners, or invite one;
+  - the last Owner can't leave, step down or be removed;
+  - a personal workspace takes no invites and can't be transferred, left or
+    deleted;
+  - an invitee who is already a member keeps the higher role.
+- **Invites** (`accounts.create_invite` and friends): addressed to a GitHub
+  login, or a one-time link whose token is returned once and stored as a
+  SHA-256. Pending for 7 days (`INVITE_DAYS`). Used, revoked or expired: 410.
+  Someone else's: 404.
+- **`audit.py`**: `record(action, workspace_id=..., actor=..., ...)` writes one
+  `audit_events` row and never raises. The actor is a user, `scheduler` or
+  `platform_admin`. Details hold the values a change set, except secrets:
+  a secret's name only, and a repo token as `set` / `removed`. `events()` pages
+  newest first by id. Platform-level actions (deleting a workspace or a user)
+  are stored with no workspace.
+- **`api/common.py`** deletes things with everything kept about them:
+  `forget_repo`, `delete_workspace_everything` and `delete_user_everything`.
+  The last one also deletes the team workspaces the user was the only member
+  of. Where the user was the last Owner of a team with other members, it
+  makes the highest-ranked member Owner and returns those promotions for the
+  caller to audit. Both refuse with 409 while an affected repo is scanning.
+- **`api/admin.py`**: users (list; disable, which ends their sessions; enable;
+  delete) and workspaces (list with counts; one workspace's members and repos,
+  recorded in that workspace's log as `admin.view_workspace`). No scan results
+  or keys.
+
 ### `pipeline.py` (scan orchestration)
 - In-memory state: `_status` (`ScanStatus` keyed by `(repo_id, branch)` tuple),
   `_locks` (asyncio lock per `(repo_id, branch)` = overlap guard — one branch
@@ -331,12 +390,18 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   (fire-and-forget task for one branch).
 
 ### `main.py`
-- `lifespan` — runs `db.upgrade()` (pending migrations), then starts/stops the
-  scheduler. If Postgres is down, startup fails and systemd retries.
-- `app` — FastAPI + CORS (Vite origins) + router; `GET /api/health`.
+- `lifespan` — runs `db.upgrade()` (pending migrations), re-creates the local
+  user and workspace, checks that encryption works (the public mode fails here
+  without `APP_SECRET_KEY`), encrypts any per-repo token still in plain text,
+  then starts/stops the scheduler. If Postgres is down, startup fails and
+  systemd retries.
+- `app` — FastAPI + CORS (Vite origins) + `CsrfMiddleware` + the routers
+  (`auth`, then `routes`, `workspaces` and `admin`, all three behind
+  `rbac.authorize`); `GET /api/health`.
 
 ### `api/routes.py` (REST — reads/writes via `storage.py`)
-- Every route takes `me: Principal = Depends(get_principal)`. Repos are scoped to
+- Every route takes `me: Principal = Depends(get_principal)`, and the router's
+  `rbac.authorize` has already checked the caller's role. Repos are scoped to
   the caller's workspaces, and in the public mode new repos get random IDs
   (`storage.new_repo_id`).
 - Helpers:
@@ -345,11 +410,14 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
     workspace the caller isn't in;
   - `_require_branch(repo, branch)`: 404 if the repo doesn't track that
     branch;
-  - `_forget_repo` (the repo's data, schedule, uploads and in-memory state);
-  - `_event` (a usage event).
-- Settings and secrets: `GET/PUT /api/settings` (per workspace, including
-  secret hints) and `PUT/DELETE /api/secrets/{name}` (write-only).
-- Account: `GET /api/me`, and `DELETE /api/me` (public mode).
+  - `_event` (a usage event) and `_audit` (an audit entry in the repo's or
+    the active workspace).
+- Settings and secrets: `GET/PUT /api/settings` (per workspace; secret hints
+  only for roles with the `secrets` permission) and `PUT/DELETE
+  /api/secrets/{name}` (write-only).
+- Account: `GET /api/me` (including `permissions`, which the UI uses to
+  disable what the caller can't do), and `DELETE /api/me` (public mode; 409
+  while the caller is the last Owner of a team with other members).
 - Repos: `list_repos` (adds `branches_info: list[{branch, latest_snapshot,
   flag_counts, scan_state, last_scan}]`, one entry per branch), `create_repo`
   (derives id, schedules every branch, triggers a first scan **per branch**),
@@ -667,6 +735,14 @@ Phase 0 of the cloud plan added these tests:
 - `test_ai_optional.py`: AI failures keep every structured verdict;
 - `test_docker_capability.py`: no Docker means skipped, not degraded;
 - `test_scan_runs.py`: one fact row per scan, plus the failed-lookup tally.
+
+Phase 2 added:
+- `test_auth.py` and `test_accounts.py`: sign-in with GitHub mocked, cookies,
+  the user cap, CSRF, workspace isolation (404s), secrets and key rotation;
+- `test_rbac.py`: every route declares a permission, every role against
+  every kind of route, the Owner and personal-workspace rules, invites,
+  account deletion, the audit log, and the platform admin.
+
 Each test gets a throwaway SQLite DB (schema from the ORM models);
 `TEST_DATABASE_URL=postgresql+psycopg://…` runs them on Postgres instead (via
 migrations, tables truncated between tests — use a scratch DB).

@@ -292,6 +292,49 @@ class UsageEventRow(Base):
     meta: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
 
 
+class InviteRow(Base):
+    """An invitation into a workspace. It's either for a GitHub login (it
+    shows up when that person signs in) or a one-time link (only a SHA-256 of
+    the link's token is stored). It expires after 7 days."""
+    __tablename__ = "invites"
+    __table_args__ = (
+        Index("ix_invites_workspace", "workspace_id"),
+        Index("ix_invites_login", "github_login"),
+        Index("ux_invites_token", "token_hash", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    github_login: Mapped[str | None] = mapped_column(Text)   # lower-cased
+    token_hash: Mapped[str | None] = mapped_column(String(64))
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")  # pending | accepted | declined | revoked
+    responded_by: Mapped[str | None] = mapped_column(Text)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuditEventRow(Base):
+    """Who did what in a workspace: repo changes, scans, role and member
+    changes, keys set or removed, AI settings, and a platform admin viewing the
+    workspace. Never secret values. Platform-level actions have no workspace."""
+    __tablename__ = "audit_events"
+    __table_args__ = (Index("ix_audit_workspace_id", "workspace_id", "id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[str | None] = mapped_column(Text)
+    actor_kind: Mapped[str] = mapped_column(String(16), nullable=False)  # user | scheduler | platform_admin
+    action: Mapped[str] = mapped_column(String(48), nullable=False)
+    target_type: Mapped[str | None] = mapped_column(String(24))
+    target_id: Mapped[str | None] = mapped_column(Text)
+    details: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+
+
 class ScanRunRow(Base):
     """One row per scan attempt: the fact table behind the admin analytics. It's
     written once, when the scan ends, including failed scans, which never

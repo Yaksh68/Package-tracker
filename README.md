@@ -110,7 +110,7 @@ branch, planned release date, and interval. The first scan starts immediately.
 | `APP_SECRET_KEY_PREVIOUS` | The old key while rotating: values encrypted with either key still decrypt |
 | `PUBLIC_BASE_URL` | Where the app is reached (default `http://localhost:5173`). The GitHub OAuth callback is `PUBLIC_BASE_URL/api/auth/github/callback`; `https://` turns on Secure cookies |
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | The GitHub OAuth app used for Sign in with GitHub (public mode) |
-| `PLATFORM_ADMINS` | Comma-separated GitHub logins with platform-admin rights. They can always sign up, and they get the repos from before the public mode |
+| `PLATFORM_ADMINS` | Comma-separated GitHub logins with platform-admin rights: the `/api/admin` routes (users and workspaces across the service). They can always sign up, and they get the repos from before the public mode |
 | `MAX_USERS` | Sign-up cap (default 50) |
 | `SESSION_DAYS` | How long a session lasts (default 30) |
 | `GIT_HOST_ALLOWLIST` | Comma-separated hosts repos may be cloned from (`*.example.com` = subdomains). Empty = any host in the local mode; the public mode defaults to github.com, gitlab.com, bitbucket.org, codeberg.org |
@@ -200,13 +200,39 @@ to run against Postgres (tables are truncated between tests — use a scratch DB
 | GET | `/api/repos/{id}/snapshots/{ts}/components` | merged packages+enrichment+flags (filters: `ecosystem`, `status`, `search`, `direct_only`) |
 | GET | `/api/repos/{id}/snapshots/{ts}/report.csv` | CSV export (built on request) |
 | GET | `/api/repos/{id}/diff?from=&to=` | status changes between snapshots |
-| GET/PUT | `/api/settings` | the active workspace's settings (AI research on/off, AI provider, model, search provider) plus which secrets are set, as hints only |
+| GET/PUT | `/api/settings` | the active workspace's settings (AI research on/off, AI provider, model, search provider) plus which secrets are set. Admins and Owners also see each secret's hint |
 | PUT/DELETE | `/api/secrets/{name}` | save or remove a workspace secret: `ai_api_key`, `search_api_key`, `github_token`, `gitlab_token`. Write-only: values are never returned |
-| GET/DELETE | `/api/me` | the caller, their active workspace and role, and their workspaces; DELETE deletes the account (public mode) |
+| GET/DELETE | `/api/me` | the caller, their active workspace, their role and permissions there, and their workspaces; DELETE deletes the account (public mode) |
+| GET/POST | `/api/workspaces` | your workspaces; create a team workspace (public mode) |
+| PUT/DELETE | `/api/workspaces/{id}` | rename; delete a team workspace with everything in it |
+| POST | `/api/workspaces/{id}/transfer` | make another member Owner and step down to Admin |
+| POST | `/api/workspaces/{id}/leave` | leave a team workspace |
+| GET | `/api/workspaces/{id}/members` | members and their roles |
+| PUT/DELETE | `/api/workspaces/{id}/members/{user_id}` | change a member's role; remove a member |
+| GET/POST | `/api/workspaces/{id}/invites` | open invites; invite by GitHub login, or leave the login out for a one-time link (its URL is shown only in this response) |
+| DELETE | `/api/workspaces/{id}/invites/{invite_id}` | revoke an invite |
+| GET | `/api/invites` | invites waiting for you |
+| POST | `/api/invites/{id}/accept`, `/api/invites/{id}/decline`, `/api/invites/accept-link` | answer an invite, or use a link's token |
+| GET | `/api/workspaces/{id}/audit?before=&limit=` | the audit log, newest first; pass the last entry's id as `before` for the next page |
+| GET | `/api/admin/users` | platform admin: every user |
+| PUT/DELETE | `/api/admin/users/{id}` | platform admin: disable or enable (`{"status": "disabled"}` also signs them out); delete |
+| GET | `/api/admin/workspaces`, `/api/admin/workspaces/{id}` | platform admin: every workspace with member and repo counts; one workspace's members and repos (metadata only, and recorded in that workspace's audit log) |
 | GET | `/api/auth/github/login`, `/api/auth/github/callback` | Sign in with GitHub (public mode) |
 | POST | `/api/auth/logout` | end the session |
 
-In the public mode, every `/api` call except health and sign-in needs a session cookie. Data-changing calls also need the header `X-Requested-With: packages-tracker`, and `X-Workspace: <id>` picks the workspace (the default is your personal one). Repos in workspaces you're not in return 404.
+In the public mode, every `/api` call except health and sign-in needs a session cookie. Data-changing calls also need the header `X-Requested-With: packages-tracker`, and `X-Workspace: <id>` picks the workspace (the default is your personal one). Repos and workspaces you're not in return 404, and the admin routes return 404 to everyone but the platform admins.
+
+### Roles
+Each route needs a role in the workspace it touches (for `/api/repos/{id}`, the repo's workspace). Each role can do everything the one above it can. Without the role, the call returns 403.
+
+| Role | Can |
+|---|---|
+| Viewer | see repos, results, history and scan activity; export CSV; see the settings and the members |
+| Editor | also add and edit repos, upload zips, and run scans (these spend the workspace's AI key) |
+| Admin | also delete repos; change settings; set or remove keys and tokens; invite and remove members and change their roles; read the audit log |
+| Owner | also make, change or remove Owners; rename, transfer or delete the workspace |
+
+The last Owner can't leave, step down or be removed. A personal workspace belongs to its account alone: it takes no invites, and deleting the account deletes it. Deleting an account also deletes any team workspace its user was the only member of. In the local mode the built-in user is the Owner of everything.
 
 ## Milestone status
 - **M0 skeleton — done**: storage/config/models, flag engine, deterministic
