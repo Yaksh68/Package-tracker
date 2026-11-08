@@ -105,7 +105,14 @@ branch, planned release date, and interval. The first scan starts immediately.
 
 | Var | Purpose |
 |---|---|
-| `AUTH_MODE` | `none` (default: no login, one local user) or `github` (public mode; for now it only tightens the clone and Docker rules, and sign-in comes later) |
+| `AUTH_MODE` | `none` (default: no login, the built-in local user and workspace) or `github` (public mode: Sign in with GitHub, workspaces, per-workspace keys, and stricter clone and Docker rules) |
+| `APP_SECRET_KEY` | Encrypts stored keys and tokens. **Required in the public mode** (generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`). Local installs without one get a generated key in `LOCAL_SECRET_KEY_FILE` (default `data/secret.key`) |
+| `APP_SECRET_KEY_PREVIOUS` | The old key while rotating: values encrypted with either key still decrypt |
+| `PUBLIC_BASE_URL` | Where the app is reached (default `http://localhost:5173`). The GitHub OAuth callback is `PUBLIC_BASE_URL/api/auth/github/callback`; `https://` turns on Secure cookies |
+| `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | The GitHub OAuth app used for Sign in with GitHub (public mode) |
+| `PLATFORM_ADMINS` | Comma-separated GitHub logins with platform-admin rights. They can always sign up, and they get the repos from before the public mode |
+| `MAX_USERS` | Sign-up cap (default 50) |
+| `SESSION_DAYS` | How long a session lasts (default 30) |
 | `GIT_HOST_ALLOWLIST` | Comma-separated hosts repos may be cloned from (`*.example.com` = subdomains). Empty = any host in the local mode; the public mode defaults to github.com, gitlab.com, bitbucket.org, codeberg.org |
 | `CLONE_TIMEOUT_SECONDS` | Kill a clone that runs longer than this (default 120) |
 | `IMAGE_INSPECT` | Docker image inventory: `auto` (default: use Docker when it's there, otherwise skip without degrading the scan), `on`, or `off`. Always off in the public mode |
@@ -193,7 +200,13 @@ to run against Postgres (tables are truncated between tests — use a scratch DB
 | GET | `/api/repos/{id}/snapshots/{ts}/components` | merged packages+enrichment+flags (filters: `ecosystem`, `status`, `search`, `direct_only`) |
 | GET | `/api/repos/{id}/snapshots/{ts}/report.csv` | CSV export (built on request) |
 | GET | `/api/repos/{id}/diff?from=&to=` | status changes between snapshots |
-| GET/PUT | `/api/settings` | runtime toggles (e.g. `use_enrichment_agent`), UI-editable |
+| GET/PUT | `/api/settings` | the active workspace's settings (AI research on/off, AI provider, model, search provider) plus which secrets are set, as hints only |
+| PUT/DELETE | `/api/secrets/{name}` | save or remove a workspace secret: `ai_api_key`, `search_api_key`, `github_token`, `gitlab_token`. Write-only: values are never returned |
+| GET/DELETE | `/api/me` | the caller, their active workspace and role, and their workspaces; DELETE deletes the account (public mode) |
+| GET | `/api/auth/github/login`, `/api/auth/github/callback` | Sign in with GitHub (public mode) |
+| POST | `/api/auth/logout` | end the session |
+
+In the public mode, every `/api` call except health and sign-in needs a session cookie. Data-changing calls also need the header `X-Requested-With: packages-tracker`, and `X-Workspace: <id>` picks the workspace (the default is your personal one). Repos in workspaces you're not in return 404.
 
 ## Milestone status
 - **M0 skeleton — done**: storage/config/models, flag engine, deterministic

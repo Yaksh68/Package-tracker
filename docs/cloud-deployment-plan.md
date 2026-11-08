@@ -1,6 +1,6 @@
 # Cloud deployment: public multi-user Packages Tracker (implementation plan)
 
-> **Status:** Phases 0 and 1 are merged (2026-11-07); Phase 2a is in progress. Each phase ships as its own branch and pull request.
+> **Status:** Phases 0 and 1 are merged (2026-11-07). Phase 2a is done on `phase-2a-accounts` (2026-11-08). Each phase ships as its own branch and pull request.
 >
 > **Decisions locked (2026-11-07):**
 > 1. **Public multi-user service.** People sign in, work in **workspaces** (teams), and bring their own AI keys.
