@@ -21,9 +21,10 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from . import db, legacy_files, storage
+from . import accounts, db, legacy_files, storage
 from .config import get_settings
-from .db_models import AppSettingRow, SnapshotRow
+from .db_models import SnapshotRow
+from .models import LOCAL_WORKSPACE_ID
 
 
 @dataclass
@@ -96,13 +97,13 @@ def run(data_dir: Path, *, overwrite_repos: bool = False, dry_run: bool = False,
     if empty_db:
         c.settings_added = len(legacy_settings)
     else:
-        with db.session() as s:
-            have = {r.key for r in s.scalars(select(AppSettingRow))}
-            for k, v in legacy_settings.items():
-                if k not in have:
-                    c.settings_added += 1
-                    if not dry_run:
-                        s.add(AppSettingRow(key=k, value=v))
+        # runtime settings live per workspace now; the legacy ones were the
+        # local install's, so they belong to the local workspace
+        have = accounts.workspace_settings(LOCAL_WORKSPACE_ID)
+        new = {k: v for k, v in legacy_settings.items() if k not in have}
+        c.settings_added += len(new)
+        if new and not dry_run:
+            accounts.set_workspace_settings(LOCAL_WORKSPACE_ID, new)
 
     for lb in legacy_files.discover(data_dir):
         say(f"history {lb.repo_id} @ {lb.branch}: {len(lb.snapshots)} snapshot(s)")

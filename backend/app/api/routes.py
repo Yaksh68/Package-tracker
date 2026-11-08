@@ -1,15 +1,26 @@
-"""REST API — reads/writes the JSON files, drives scans, serves reports."""
+"""REST API: repos, scans, uploads, snapshots, reports, per-workspace settings
+and secrets, and the signed-in account.
+
+Every route resolves the caller (auth.get_principal). In the local mode
+that's the built-in local user and workspace; in the public mode it's the
+signed-in user and their active workspace. Repos are scoped to workspaces:
+a repo in a workspace the caller isn't in is a 404, so its existence never
+leaks. Roles and permissions arrive in phase 2b; until then every member of
+a workspace can do everything in it.
+"""
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile
-from pydantic import ValidationError
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field, ValidationError
 
+from .. import accounts, scanlog, scheduler, settings_store, storage, uploads
 from .. import flags as flags_mod
-from .. import scanlog, scheduler, settings_store, storage, uploads
+from ..auth import Principal, get_principal, session_cookie_name
+from ..config import get_settings
 from ..git_rules import RepoUrlError, check_branch
 from ..models import (
     Repo,
@@ -19,26 +30,100 @@ from ..models import (
     UploadRepoCreate,
     upload_version,
 )
-from ..pipeline import clear_repo_state, get_status, is_scanning, run_scan
+from ..pipeline import clear_repo_state, get_status, is_scanning, run_scan  # noqa: F401 - run_scan re-exported
 
 router = APIRouter(prefix="/api")
 
 
+def _event(me: Principal, event: str, **meta) -> None:
+    accounts.record_event(event, workspace_id=me.workspace_id, user_id=me.user.id, **meta)
+
+
 # --------------------------------------------------------------------------- #
-# runtime settings (UI-editable)                                               #
+# the signed-in account                                                         #
+# --------------------------------------------------------------------------- #
+@router.get("/me")
+def me_route(me: Principal = Depends(get_principal)) -> dict:
+    return {
+        "mode": "github" if get_settings().public_mode() else "local",
+        "user": me.user.model_dump(mode="json"),
+        "workspace_id": me.workspace_id,
+        "role": me.role,
+        "workspaces": [w.model_dump() for w in me.workspaces],
+    }
+
+
+@router.delete("/me", status_code=204)
+def delete_account(me: Principal = Depends(get_principal)) -> Response:
+    """Delete the signed-in user, their personal workspace (repos, history,
+    uploads, settings, secrets) and their analytics rows."""
+    if not get_settings().public_mode():
+        raise HTTPException(400, "there are no accounts to delete in the local mode")
+    personal = accounts.personal_workspace_ids(me.user.id)
+    repos = [r for ws in personal for r in storage.load_repos(ws)]
+    if any(is_scanning(r.id, b) for r in repos for b in r.branches):
+        raise HTTPException(409, "a scan is in progress; try again once it finishes")
+    for r in repos:
+        _forget_repo(r.id)
+    for ws in personal:
+        accounts.delete_workspace(ws)
+    accounts.delete_user(me.user.id)  # sessions, memberships and activity cascade
+    resp = Response(status_code=204)
+    resp.delete_cookie(session_cookie_name(), path="/")
+    return resp
+
+
+# --------------------------------------------------------------------------- #
+# runtime settings and secrets (per workspace)                                  #
 # --------------------------------------------------------------------------- #
 @router.get("/settings")
-def get_settings_route() -> dict:
-    return settings_store.get_runtime_settings()
+def get_settings_route(me: Principal = Depends(get_principal)) -> dict:
+    """The workspace's settings, plus whether each secret is set (and its
+    hint). Secret values are never returned."""
+    return {**settings_store.get_runtime_settings(me.workspace_id),
+            "secrets": accounts.secret_hints(me.workspace_id)}
 
 
 @router.put("/settings")
-def update_settings_route(patch: dict) -> dict:
-    return settings_store.update_runtime_settings(patch)
+def update_settings_route(patch: dict, me: Principal = Depends(get_principal)) -> dict:
+    try:
+        out = settings_store.update_runtime_settings(patch, me.workspace_id)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    if "use_enrichment_agent" in patch:
+        _event(me, "ai_toggle", on=bool(out["use_enrichment_agent"]))
+    return {**out, "secrets": accounts.secret_hints(me.workspace_id)}
+
+
+class SecretValue(BaseModel):
+    value: str = Field(min_length=1, max_length=4096)
+
+
+def _secret_name(name: str) -> str:
+    if name not in accounts.SECRET_NAMES:
+        raise HTTPException(404, f"unknown secret '{name}'")
+    return name
+
+
+@router.put("/secrets/{name}")
+def set_secret_route(name: str, body: SecretValue, me: Principal = Depends(get_principal)) -> dict:
+    """Save a workspace secret (an AI or search key, a git token). Write-only:
+    the response, like every later read, carries only a hint."""
+    hint = accounts.set_secret(me.workspace_id, _secret_name(name), body.value.strip(),
+                               by=me.user.id)
+    _event(me, "secret_set", name=name)
+    return {"name": name, "set": True, "hint": hint}
+
+
+@router.delete("/secrets/{name}", status_code=204)
+def delete_secret_route(name: str, me: Principal = Depends(get_principal)) -> Response:
+    if accounts.delete_secret(me.workspace_id, _secret_name(name)):
+        _event(me, "secret_removed", name=name)
+    return Response(status_code=204)
 
 
 # --------------------------------------------------------------------------- #
-# helpers                                                                      #
+# helpers                                                                       #
 # --------------------------------------------------------------------------- #
 def _mask(repo: Repo) -> dict:
     d = repo.model_dump(mode="json")
@@ -47,9 +132,9 @@ def _mask(repo: Repo) -> dict:
     return d
 
 
-def _require_repo(repo_id: str) -> Repo:
+def _require_repo(repo_id: str, me: Principal) -> Repo:
     repo = storage.get_repo(repo_id)
-    if repo is None:
+    if repo is None or not me.member_of(repo.workspace_id):
         raise HTTPException(404, f"repo '{repo_id}' not found")
     return repo
 
@@ -60,13 +145,31 @@ def _require_branch(repo: Repo, branch: str) -> str:
     return branch
 
 
+def _new_repo_id(slug_source: str) -> str:
+    # The local mode keeps readable slugs. The public mode uses random IDs: a
+    # slug collides as soon as two users add the same repo.
+    if get_settings().public_mode():
+        return storage.new_repo_id()
+    return storage.slugify_repo_id(slug_source)
+
+
+def _forget_repo(repo_id: str) -> None:
+    """Delete a repo and everything kept about it: history, schedule, uploads,
+    and in-memory scan state."""
+    storage.delete_repo(repo_id)
+    scheduler.unsync_repo(repo_id)      # stop every branch's interval job
+    uploads.delete(repo_id)             # uploaded zips, if any
+    clear_repo_state(repo_id)           # drop in-memory scan status + lock (all branches)
+    scanlog.clear_repo(repo_id)         # drop in-memory activity trace (all branches)
+
+
 # --------------------------------------------------------------------------- #
 # repos CRUD                                                                    #
 # --------------------------------------------------------------------------- #
 @router.get("/repos")
-def list_repos() -> list[dict]:
+def list_repos(me: Principal = Depends(get_principal)) -> list[dict]:
     out = []
-    for r in storage.load_repos():
+    for r in storage.load_repos(me.workspace_id):
         d = _mask(r)
         branches_info = []
         for b in r.branches:
@@ -93,12 +196,16 @@ def list_repos() -> list[dict]:
 
 
 @router.post("/repos", status_code=201)
-async def create_repo(body: RepoCreate) -> dict:
-    repo_id = body.id or storage.slugify_repo_id(body.url)
+async def create_repo(body: RepoCreate, me: Principal = Depends(get_principal)) -> dict:
+    repo_id = (body.id if body.id and not get_settings().public_mode()
+               else _new_repo_id(body.url))
     if storage.get_repo(repo_id):
         raise HTTPException(409, f"repo '{repo_id}' already exists")
     repo = Repo(
         id=repo_id,
+        workspace_id=me.workspace_id,
+        name=storage.slugify_repo_id(body.url),
+        created_by=me.user.id,
         url=body.url,
         branches=body.branches,
         release_date=body.release_date,
@@ -114,17 +221,18 @@ async def create_repo(body: RepoCreate) -> dict:
     for branch in repo.branches:
         # first scan starts immediately, per branch
         scheduler.trigger_now(repo, branch, trigger="initial")
+    _event(me, "repo_added", source="git", branches=len(repo.branches))
     return _mask(repo)
 
 
 @router.get("/repos/{repo_id}")
-def get_repo(repo_id: str) -> dict:
-    return _mask(_require_repo(repo_id))
+def get_repo(repo_id: str, me: Principal = Depends(get_principal)) -> dict:
+    return _mask(_require_repo(repo_id, me))
 
 
 @router.put("/repos/{repo_id}")
-def update_repo(repo_id: str, body: RepoUpdate) -> dict:
-    repo = _require_repo(repo_id)
+def update_repo(repo_id: str, body: RepoUpdate, me: Principal = Depends(get_principal)) -> dict:
+    repo = _require_repo(repo_id, me)
     updates = body.model_dump(exclude_unset=True)
     # A git repo's branches go to `git clone`; upload "branches" are free-form
     # version labels, so only git repos get the ref-name check.
@@ -133,9 +241,9 @@ def update_repo(repo_id: str, body: RepoUpdate) -> dict:
             updates["branches"] = [check_branch(b) for b in updates["branches"]]
         except RepoUrlError as e:
             raise HTTPException(422, str(e)) from e
-    reflag = "release_date" in updates or (
-        "ignored_packages" in updates and updates["ignored_packages"] != repo.ignored_packages
-    )
+    ignored_changed = ("ignored_packages" in updates
+                       and updates["ignored_packages"] != repo.ignored_packages)
+    reflag = "release_date" in updates or ignored_changed
     removed = set(repo.branches) - set(updates.get("branches") or repo.branches)
     repo = repo.model_copy(update=updates)
     storage.upsert_repo(repo)
@@ -149,20 +257,20 @@ def update_repo(repo_id: str, body: RepoUpdate) -> dict:
     if reflag:
         for branch in repo.branches:
             _reflag_latest(repo, branch)
+    if "release_date" in updates:
+        _event(me, "release_date_edit")
+    if ignored_changed:
+        _event(me, "ignored_packages_edit", count=len(repo.ignored_packages))
     return _mask(repo)
 
 
 @router.delete("/repos/{repo_id}", status_code=204)
-def delete_repo(repo_id: str) -> Response:
-    repo = _require_repo(repo_id)
+def delete_repo(repo_id: str, me: Principal = Depends(get_principal)) -> Response:
+    repo = _require_repo(repo_id, me)
     if any(is_scanning(repo_id, b) for b in repo.branches):
         raise HTTPException(409, "a scan is in progress; try again once it finishes")
-    if not storage.delete_repo(repo_id):
-        raise HTTPException(404, f"repo '{repo_id}' not found")
-    scheduler.unsync_repo(repo_id)      # stop every branch's interval job
-    uploads.delete(repo_id)             # uploaded zips, if any
-    clear_repo_state(repo_id)           # drop in-memory scan status + lock (all branches)
-    scanlog.clear_repo(repo_id)         # drop in-memory activity trace (all branches)
+    _forget_repo(repo_id)
+    _event(me, "repo_deleted")
     return Response(status_code=204)
 
 
@@ -186,14 +294,16 @@ def _reflag_latest(repo: Repo, branch: str) -> None:
 # scans                                                                         #
 # --------------------------------------------------------------------------- #
 @router.post("/repos/{repo_id}/scan", status_code=202)
-async def scan_now(repo_id: str, branch: str = Query(...)) -> dict:
-    repo = _require_repo(repo_id)
+async def scan_now(repo_id: str, branch: str = Query(...),
+                   me: Principal = Depends(get_principal)) -> dict:
+    repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
     if is_scanning(repo_id, branch):
         raise HTTPException(409, "a scan is already in progress")
     if repo.source == "upload" and not uploads.has_upload(repo_id, branch):
         raise HTTPException(400, f"no zip uploaded for version '{branch}' yet")
     scheduler.trigger_now(repo, branch, trigger="manual")
+    _event(me, "manual_scan")
     return {"status": "queued", "repo_id": repo_id, "branch": branch}
 
 
@@ -210,13 +320,14 @@ async def _store_zip(repo_id: str, version: str, file: UploadFile) -> None:
 
 
 @router.post("/repos/upload", status_code=201)
-async def create_upload_repo(file: UploadFile = File(...), meta: str = Form(...)) -> dict:
+async def create_upload_repo(file: UploadFile = File(...), meta: str = Form(...),
+                             me: Principal = Depends(get_principal)) -> dict:
     """Add a repo scanned from an uploaded zip. `meta` is UploadRepoCreate as JSON."""
     try:
         body = UploadRepoCreate.model_validate_json(meta)
     except ValidationError as e:
         raise HTTPException(422, e.errors(include_url=False, include_context=False)) from e
-    repo_id = storage.slugify_repo_id(body.name)
+    repo_id = _new_repo_id(body.name)
     if storage.get_repo(repo_id):
         raise HTTPException(409, f"repo '{repo_id}' already exists")
     version = upload_version(body.version)
@@ -227,6 +338,9 @@ async def create_upload_repo(file: UploadFile = File(...), meta: str = Form(...)
         raise
     repo = Repo(
         id=repo_id,
+        workspace_id=me.workspace_id,
+        name=body.name,
+        created_by=me.user.id,
         source="upload",
         url=f"upload://{file.filename}",
         branches=[version],
@@ -239,16 +353,19 @@ async def create_upload_repo(file: UploadFile = File(...), meta: str = Form(...)
     storage.upsert_repo(repo)
     scheduler.sync_repo(repo)
     scheduler.trigger_now(repo, version, trigger="upload")
+    _event(me, "repo_added", source="upload")
+    _event(me, "zip_upload")
     return _mask(repo)
 
 
 @router.post("/repos/{repo_id}/upload")
 async def upload_version_zip(
     repo_id: str, file: UploadFile = File(...), version: str | None = Form(None),
+    me: Principal = Depends(get_principal),
 ) -> dict:
     """Upload a zip for a new version, or replace an existing version's zip,
     then scan it."""
-    repo = _require_repo(repo_id)
+    repo = _require_repo(repo_id, me)
     if repo.source != "upload":
         raise HTTPException(400, f"repo '{repo_id}' is scanned from git, not from uploads")
     version = upload_version(version)
@@ -260,21 +377,24 @@ async def upload_version_zip(
     storage.upsert_repo(repo)
     scheduler.sync_repo(repo)
     scheduler.trigger_now(repo, version, trigger="upload")
+    _event(me, "zip_upload")
     return _mask(repo)
 
 
 @router.get("/repos/{repo_id}/scan-status", response_model=ScanStatus)
-def scan_status(repo_id: str, branch: str = Query(...)) -> ScanStatus:
-    repo = _require_repo(repo_id)
+def scan_status(repo_id: str, branch: str = Query(...),
+                me: Principal = Depends(get_principal)) -> ScanStatus:
+    repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
     return get_status(repo_id, branch)
 
 
 @router.get("/repos/{repo_id}/scan-log")
-def scan_log(repo_id: str, branch: str = Query(...), ts: str | None = None) -> dict:
+def scan_log(repo_id: str, branch: str = Query(...), ts: str | None = None,
+             me: Principal = Depends(get_principal)) -> dict:
     """Activity trace. Defaults to the in-memory log of the current/most-recent
     run; pass ?ts=<snapshot> to read a persisted trace from that snapshot."""
-    repo = _require_repo(repo_id)
+    repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
     if ts:
         persisted = storage.read_scan_log(repo_id, branch, ts)
@@ -297,8 +417,9 @@ def scan_log(repo_id: str, branch: str = Query(...), ts: str | None = None) -> d
 # snapshots                                                                     #
 # --------------------------------------------------------------------------- #
 @router.get("/repos/{repo_id}/snapshots")
-def list_snapshots(repo_id: str, branch: str = Query(...)) -> list[dict]:
-    repo = _require_repo(repo_id)
+def list_snapshots(repo_id: str, branch: str = Query(...),
+                   me: Principal = Depends(get_principal)) -> list[dict]:
+    repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
     return [s.model_dump(mode="json") for s in storage.load_index(repo_id, branch)]
 
@@ -312,8 +433,9 @@ def components(
     status: str | None = None,
     search: str | None = None,
     direct_only: bool = Query(False),
+    me: Principal = Depends(get_principal),
 ) -> list[dict]:
-    repo = _require_repo(repo_id)
+    repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
     packages = storage.read_packages(repo_id, branch, ts)
     if not packages and ts not in {s.ts for s in storage.load_index(repo_id, branch)}:
@@ -360,12 +482,14 @@ def components(
 
 
 @router.get("/repos/{repo_id}/snapshots/{ts}/report.csv")
-def report_csv(repo_id: str, ts: str, branch: str = Query(...)) -> Response:
-    repo = _require_repo(repo_id)
+def report_csv(repo_id: str, ts: str, branch: str = Query(...),
+               me: Principal = Depends(get_principal)) -> Response:
+    repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
     csv_text = storage.read_report_csv(repo_id, branch, ts)
     if csv_text is None:
         raise HTTPException(404, "report not found")
+    _event(me, "csv_export")
     return PlainTextResponse(
         csv_text,
         media_type="text/csv",
@@ -382,8 +506,9 @@ def diff(
     branch: str = Query(...),
     from_ts: str = Query(alias="from"),
     to_ts: str = Query(alias="to"),
+    me: Principal = Depends(get_principal),
 ) -> dict:
-    repo = _require_repo(repo_id)
+    repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
     old = {f.key: f for f in storage.read_flags(repo_id, branch, from_ts)}
     new = {f.key: f for f in storage.read_flags(repo_id, branch, to_ts)}
@@ -407,4 +532,5 @@ def diff(
             continue
         p = old_pkgs.get(key)
         removed.append({"name": p.name if p else key, "flag": old[key].status.value})
+    _event(me, "diff_view")
     return {"from": from_ts, "to": to_ts, "changed": changed, "added": added, "removed": removed}

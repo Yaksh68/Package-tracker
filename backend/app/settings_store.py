@@ -1,44 +1,82 @@
-"""Runtime, UI-editable settings persisted in the `app_settings` table.
+"""Runtime, UI-editable settings, per workspace (`workspace_settings`).
 
-These override the env-file defaults from config.py at runtime, so toggles like
-"AI enrichment on/off" can be flipped from the dashboard without a restart. Only
-a small allowlist of keys is editable.
+They override the env defaults from config.py at runtime, so a toggle like
+"AI research on/off" takes effect from the next scan without a restart. Only
+an allowlist of keys is editable. API keys and tokens aren't settings: they
+live in `secrets` (accounts.set_secret).
+
+Defaults:
+- The local workspace in the local mode uses the env, as before workspaces.
+- Any other workspace starts with AI research off and no provider, until
+  someone in it configures one (users bring their own keys).
+
+Without an explicit workspace, the current scan's workspace is used, or the
+local workspace outside a scan.
 """
 from __future__ import annotations
 
-from sqlalchemy import select
-from sqlalchemy.dialects import postgresql, sqlite
-
+from . import accounts, scan_context
+from .ai.config import PRESET_BASE_URLS
 from .config import get_settings
-from .db import is_postgres, session
-from .db_models import AppSettingRow
+from .models import LOCAL_WORKSPACE_ID
 
-_EDITABLE = {"use_enrichment_agent", "use_extraction_agent"}
-
-
-def _overrides() -> dict:
-    with session() as s:
-        return {r.key: r.value for r in s.scalars(select(AppSettingRow))}
+_BOOL_KEYS = {"use_enrichment_agent", "use_extraction_agent"}
+_TEXT_KEYS = {"ai_provider", "ai_model", "ai_base_url", "search_provider"}
+_EDITABLE = _BOOL_KEYS | _TEXT_KEYS
+AI_PROVIDERS = ("", "claude-cli", "anthropic", *PRESET_BASE_URLS, "openai-compatible")
+SEARCH_PROVIDERS = ("", "tavily", "exa")
 
 
-def get_runtime_settings() -> dict:
+def _workspace(workspace_id: str | None) -> str:
+    return workspace_id or scan_context.workspace_id() or LOCAL_WORKSPACE_ID
+
+
+def defaults(workspace_id: str) -> dict:
     env = get_settings()
-    base = {
-        "use_enrichment_agent": env.use_enrichment_agent,
-        "use_extraction_agent": env.use_extraction_agent,
-    }
-    base.update({k: v for k, v in _overrides().items() if k in _EDITABLE})
+    if workspace_id == LOCAL_WORKSPACE_ID and not env.public_mode():
+        return {
+            "use_enrichment_agent": env.use_enrichment_agent,
+            "use_extraction_agent": env.use_extraction_agent,
+            "ai_provider": env.ai_provider, "ai_model": env.ai_model,
+            "ai_base_url": env.ai_base_url, "search_provider": env.search_provider,
+        }
+    return {"use_enrichment_agent": False, "use_extraction_agent": False,
+            "ai_provider": "", "ai_model": "", "ai_base_url": "", "search_provider": ""}
+
+
+def get_runtime_settings(workspace_id: str | None = None) -> dict:
+    ws = _workspace(workspace_id)
+    base = defaults(ws)
+    base.update({k: v for k, v in accounts.workspace_settings(ws).items() if k in _EDITABLE})
     return base
 
 
-def update_runtime_settings(patch: dict) -> dict:
-    # INSERT … ON CONFLICT, not merge(): two saves of a not-yet-stored key
-    # would otherwise both try to INSERT it.
-    upsert = (postgresql if is_postgres() else sqlite).insert
-    with session() as s:
-        for k, v in patch.items():
-            if k in _EDITABLE and v is not None:
-                stmt = upsert(AppSettingRow).values(key=k, value=bool(v))
-                s.execute(stmt.on_conflict_do_update(
-                    index_elements=["key"], set_={"value": stmt.excluded.value}))
-    return get_runtime_settings()
+def _clean(patch: dict) -> dict:
+    out = {}
+    for k, v in patch.items():
+        if v is None or k not in _EDITABLE:
+            continue
+        out[k] = bool(v) if k in _BOOL_KEYS else str(v).strip()
+    provider = out.get("ai_provider")
+    if provider is not None:
+        out["ai_provider"] = provider = provider.lower()
+        if provider not in AI_PROVIDERS:
+            raise ValueError(f"unknown AI provider {provider!r}")
+        if provider == "claude-cli" and get_settings().public_mode():
+            raise ValueError("the Claude CLI can't be used in the public mode")
+    search = out.get("search_provider")
+    if search is not None:
+        out["search_provider"] = search = search.lower()
+        if search not in SEARCH_PROVIDERS:
+            raise ValueError(f"unknown search provider {search!r}")
+    base_url = out.get("ai_base_url")
+    if base_url and not base_url.lower().startswith(("https://", "http://")):
+        raise ValueError("the AI base URL must start with https:// or http://")
+    return out
+
+
+def update_runtime_settings(patch: dict, workspace_id: str | None = None) -> dict:
+    """Apply the editable keys of `patch`; raises ValueError for a bad value."""
+    ws = _workspace(workspace_id)
+    accounts.set_workspace_settings(ws, _clean(patch))
+    return get_runtime_settings(ws)

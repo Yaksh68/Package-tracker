@@ -12,12 +12,13 @@ from __future__ import annotations
 import csv
 import io
 import re
+import secrets
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import delete, func, insert, or_, select, update
 from sqlalchemy.orm import Session
 
-from . import flags
+from . import crypto, flags
 from .db import session
 from .db_models import (
     EnrichmentRow,
@@ -30,6 +31,7 @@ from .db_models import (
     SnapshotRow,
 )
 from .models import (
+    LOCAL_WORKSPACE_ID,
     Enrichment,
     Flag,
     Package,
@@ -60,6 +62,12 @@ def slugify_repo_id(url: str) -> str:
     return slug or "repo"
 
 
+def new_repo_id() -> str:
+    """A random repo ID, for the public mode. A slug of the URL would collide
+    as soon as two users add the same repo."""
+    return f"r_{secrets.token_hex(5)}"
+
+
 # --------------------------------------------------------------------------- #
 # Repo registry                                                                #
 # --------------------------------------------------------------------------- #
@@ -73,6 +81,9 @@ def _utc(dt: datetime | None) -> datetime | None:
 def _repo_from_row(row: RepoRow, branches: list[str]) -> Repo:
     return Repo(
         id=row.id,
+        workspace_id=row.workspace_id or LOCAL_WORKSPACE_ID,
+        name=row.name,
+        created_by=row.created_by,
         url=row.url,
         source=row.source,
         branches=branches,
@@ -81,7 +92,7 @@ def _repo_from_row(row: RepoRow, branches: list[str]) -> Repo:
         inspect_image=row.inspect_image,
         image_tags=row.image_tags or {},
         detected_tag_vars=row.detected_tag_vars or [],
-        token_override=row.token_override,
+        token_override=crypto.decrypt(row.token_override) if row.token_override else None,
         ignored_packages=row.ignored_packages or [],
         created_at=_utc(row.created_at),
         last_scan_by_branch=row.last_scan_by_branch or {},
@@ -98,11 +109,35 @@ def _branches_by_repo(s: Session, repo_ids: list[str] | None = None) -> dict[str
     return out
 
 
-def load_repos() -> list[Repo]:
+def _in_workspace(workspace_id: str):
+    cond = RepoRow.workspace_id == workspace_id
+    if workspace_id == LOCAL_WORKSPACE_ID:  # rows from before workspaces existed
+        cond = or_(cond, RepoRow.workspace_id.is_(None))
+    return cond
+
+
+def load_repos(workspace_id: str | None = None) -> list[Repo]:
+    """Every repo (the scheduler), or one workspace's (the API)."""
     with session() as s:
-        rows = s.scalars(select(RepoRow).order_by(RepoRow.position)).all()
-        branches = _branches_by_repo(s)
+        q = select(RepoRow).order_by(RepoRow.position)
+        if workspace_id is not None:
+            q = q.where(_in_workspace(workspace_id))
+        rows = s.scalars(q).all()
+        branches = _branches_by_repo(s, [r.id for r in rows] if workspace_id is not None else None)
         return [_repo_from_row(r, branches.get(r.id, [])) for r in rows]
+
+
+def encrypt_plaintext_tokens() -> int:
+    """Encrypt any per-repo token still stored in plain text (rows written
+    before encryption at rest). Run at startup; returns how many changed."""
+    with session() as s:
+        rows = s.scalars(select(RepoRow).where(RepoRow.token_override.is_not(None))).all()
+        changed = 0
+        for row in rows:
+            if row.token_override and not crypto.is_encrypted(row.token_override):
+                row.token_override = crypto.encrypt(row.token_override)
+                changed += 1
+        return changed
 
 
 def get_repo(repo_id: str) -> Repo | None:
@@ -124,6 +159,9 @@ def _write_repo(s: Session, repo: Repo) -> None:
         row = RepoRow(id=repo.id, position=pos)
         s.add(row)
     dumped = repo.model_dump(mode="json")
+    row.workspace_id = repo.workspace_id or LOCAL_WORKSPACE_ID
+    row.name = repo.name
+    row.created_by = repo.created_by
     row.url = repo.url
     row.source = repo.source
     row.release_date = repo.release_date
@@ -131,7 +169,7 @@ def _write_repo(s: Session, repo: Repo) -> None:
     row.inspect_image = repo.inspect_image
     row.image_tags = dumped["image_tags"]
     row.detected_tag_vars = dumped["detected_tag_vars"]
-    row.token_override = repo.token_override
+    row.token_override = crypto.encrypt(repo.token_override) if repo.token_override else None
     row.ignored_packages = list(repo.ignored_packages)
     row.created_at = repo.created_at
     row.last_scan_by_branch = dumped["last_scan_by_branch"]

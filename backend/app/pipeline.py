@@ -13,7 +13,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from . import flags, scanlog, settings_store, storage, uploads
+from . import flags, scan_context, scanlog, settings_store, storage, uploads
 from .agents import apt_index, enrichment_agent, extraction_agent, image_inspect, source_apis
 from .agents.clone import CloneError, shallow_clone
 from .agents.image_inspect import ImageInspectError
@@ -123,6 +123,10 @@ async def run_scan(
         return get_status(repo.id, branch)  # overlap guard: skip if already running
 
     async with lock:
+        # everything below runs for the repo's workspace: its settings, AI
+        # provider and tokens (see scan_context)
+        scan_context.bind(scan_context.ScanContext(
+            workspace_id=repo.workspace_id, created_by=repo.created_by))
         settings = get_settings()
         use_agent = (
             settings.use_extraction_agent
@@ -444,6 +448,7 @@ def _record_run(
         ran_ai = ai.batches > 0
         storage.write_scan_run(ScanRunRecord(
             repo_id=repo.id,
+            workspace_id=repo.workspace_id,
             branch=branch,
             snapshot_ts=None if outcome == "error" else ts,
             triggered_by=trigger,

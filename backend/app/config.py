@@ -22,6 +22,25 @@ class Settings(BaseSettings):
     # tightens the clone and Docker rules (see public_mode()).
     auth_mode: str = "none"
 
+    # Encrypts keys and tokens at rest, and signs nothing else. Required in
+    # the public mode. Local installs without it get a generated key in
+    # `local_secret_key_file`. To rotate: set the new key here and move the
+    # old one to app_secret_key_previous until everything is re-saved.
+    app_secret_key: str | None = None
+    app_secret_key_previous: str | None = None
+    local_secret_key_file: Path = Path("data/secret.key")
+
+    # Public mode (auth_mode "github"): where the app is reached (the GitHub
+    # OAuth callback is PUBLIC_BASE_URL/api/auth/github/callback), the OAuth
+    # app's credentials, who's a platform admin (GitHub logins,
+    # comma-separated), the sign-up cap and how long a session lasts.
+    public_base_url: str = "http://localhost:5173"
+    github_oauth_client_id: str | None = None
+    github_oauth_client_secret: str | None = None
+    platform_admins: str = ""
+    max_users: int = 50
+    session_days: int = 30
+
     # Hosts repos may be cloned from, comma-separated; "*.example.com" allows
     # that domain's subdomains. Empty = any host, but only when auth_mode is
     # "none"; the public mode falls back to DEFAULT_PUBLIC_GIT_HOSTS.
@@ -113,6 +132,13 @@ class Settings(BaseSettings):
         """True when the service is open to the public (auth_mode "github"):
         stricter clone rules, no Docker image inventory."""
         return (self.auth_mode or "none").strip().lower() == "github"
+
+    def admin_logins(self) -> set[str]:
+        """GitHub logins with platform-admin rights, lower-cased."""
+        return {x.strip().lower() for x in (self.platform_admins or "").split(",") if x.strip()}
+
+    def https(self) -> bool:
+        return (self.public_base_url or "").lower().startswith("https://")
 
     def git_hosts(self) -> tuple[str, ...]:
         """The effective clone allowlist (lower-case). Empty means any host,

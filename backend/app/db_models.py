@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -34,8 +35,16 @@ class Base(DeclarativeBase):
 
 class RepoRow(Base):
     __tablename__ = "repos"
+    __table_args__ = (Index("ix_repos_workspace", "workspace_id"),)
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
+    # The workspace that owns the repo. Like snapshots, it has no FK:
+    # deleting a workspace removes its repos and their history explicitly
+    # (accounts.delete_workspace). None = the local workspace (rows written
+    # before workspaces existed).
+    workspace_id: Mapped[str | None] = mapped_column(Text)
+    name: Mapped[str | None] = mapped_column(Text)        # display name
+    created_by: Mapped[str | None] = mapped_column(Text)  # user id
     position: Mapped[int] = mapped_column(Integer, nullable=False)  # registry order
     url: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(
@@ -46,7 +55,9 @@ class RepoRow(Base):
     inspect_image: Mapped[str | None] = mapped_column(Text)
     image_tags: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
     detected_tag_vars: Mapped[list] = mapped_column(JSONType, nullable=False, default=list)
-    token_override: Mapped[str | None] = mapped_column(Text)  # plain text, as repos.json was
+    # encrypted at rest (crypto.encrypt); legacy plain-text rows are
+    # re-encrypted at startup
+    token_override: Mapped[str | None] = mapped_column(Text)
     ignored_packages: Mapped[list] = mapped_column(
         JSONType, nullable=False, default=list, server_default=text("'[]'")
     )
@@ -169,6 +180,116 @@ class AppSettingRow(Base):
 
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[object] = mapped_column(JSONType, nullable=True)
+
+
+# --------------------------------------------------------------------------- #
+# Accounts and workspaces (phase 2a)                                           #
+# --------------------------------------------------------------------------- #
+class UserRow(Base):
+    """A person who signs in with GitHub, or the built-in "local" user of the
+    local mode (no github_id)."""
+    __tablename__ = "users"
+    __table_args__ = (Index("ux_users_github_id", "github_id", unique=True),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    github_id: Mapped[int | None] = mapped_column(BigInteger)
+    login: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str | None] = mapped_column(Text)
+    avatar_url: Mapped[str | None] = mapped_column(Text)
+    platform_role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")  # user | admin
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")  # active | disabled
+    # The GitHub OAuth token from sign-in (encrypted). Scans use it for GitHub
+    # API lookups, which gives each user their own 5,000/hour limit.
+    github_token: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SessionRow(Base):
+    """A signed-in browser. Only a SHA-256 of the cookie's token is stored, so a
+    database leak doesn't hand out live sessions."""
+    __tablename__ = "sessions"
+    __table_args__ = (Index("ix_sessions_user", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    user_agent: Mapped[str | None] = mapped_column(Text)
+
+
+class WorkspaceRow(Base):
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # every user gets one personal workspace; team workspaces arrive in 2b
+    personal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MembershipRow(Base):
+    __tablename__ = "memberships"
+    __table_args__ = (Index("ix_memberships_user", "user_id"),)
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)  # owner | admin | editor | viewer
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceSettingRow(Base):
+    """A workspace's runtime settings: AI research on/off, AI provider and
+    model… Secrets are kept apart, in `secrets`."""
+    __tablename__ = "workspace_settings"
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[object] = mapped_column(JSONType, nullable=True)
+
+
+class SecretRow(Base):
+    """A workspace's API key or access token, encrypted (crypto.encrypt). The
+    API can save one but never returns it; it shows only `hint`."""
+    __tablename__ = "secrets"
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    hint: Mapped[str] = mapped_column(String(16), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_by: Mapped[str | None] = mapped_column(Text)
+
+
+class UserActivityDayRow(Base):
+    """One row per user per day they used the app (daily, weekly and monthly
+    active users, and retention)."""
+    __tablename__ = "user_activity_days"
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+
+
+class UsageEventRow(Base):
+    """Feature use, recorded on the server (CSV export, manual scan, …).
+    No IP addresses."""
+    __tablename__ = "usage_events"
+    __table_args__ = (
+        Index("ix_usage_events_at", "at"),
+        Index("ix_usage_events_event_at", "event", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event: Mapped[str] = mapped_column(String(48), nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(Text)
+    user_id: Mapped[str | None] = mapped_column(Text)
+    meta: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
 
 
 class ScanRunRow(Base):

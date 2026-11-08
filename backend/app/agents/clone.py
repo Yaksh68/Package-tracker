@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlsplit, urlunparse
 
+from .. import scan_context
 from ..config import get_settings
 from ..git_rules import RepoUrlError, check_branch, check_repo_url, require_public_address
 
@@ -45,15 +46,11 @@ class Clone:
 
 
 def _token_for(url: str, override: str | None) -> str | None:
+    """The repo's own token, else its workspace's git token for that host
+    (the env's in the local mode); see scan_context."""
     if override:
         return override
-    host = (urlparse(url).hostname or "").lower()
-    s = get_settings()
-    if "github" in host:
-        return s.github_token
-    if "gitlab" in host:
-        return s.gitlab_token
-    return None
+    return scan_context.git_token((urlparse(url).hostname or "").lower())
 
 
 def _auth_url(url: str, token: str | None) -> str:
