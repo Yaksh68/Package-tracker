@@ -79,6 +79,7 @@ packages-tracker/
 │       ├── scanlog.py            # per-scan activity trace (contextvar logger)
 │       ├── settings_store.py     # runtime, UI-editable settings, per workspace
 │       ├── git_rules.py          # which repo URLs and branches may reach git
+│       ├── safe_http.py          # HTTP that reaches public addresses only
 │       ├── crypto.py             # encryption of stored keys and tokens
 │       ├── accounts.py           # users, sessions, workspaces, members, invites, secrets
 │       ├── auth.py               # Sign in with GitHub, sessions, CSRF, get_principal
@@ -380,11 +381,17 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
 
 ### `scheduler.py` (APScheduler, in FastAPI lifespan)
 - `start`/`shutdown`; `_scan_job(repo_id, branch)` → `run_scan`.
-- `sync_repo(repo)` — adds/replaces one interval job **per branch**
+- `sync_repo(repo, *, scanning_now=())` — adds/replaces one interval job **per branch**
   (`_job_id(repo_id, branch)` = `scan:<repo_id>::<branch>`), and removes jobs for
   branches no longer in `repo.branches` (diffs against the `scan:<repo_id>::`
   prefix, so editing a repo down to fewer branches actually unschedules the
   dropped ones).
+  - A never-scanned or overdue branch gets a catch-up 30 s later; that's how a
+    branch added by an edit gets its first scan.
+  - Branches in `scanning_now` (a new repo, an uploaded zip: their scan starts
+    right away) are scheduled one interval out instead. Otherwise small repos
+    were scanned twice within a minute.
+  - `_scan_job` skips a branch that's already scanning, without an audit entry.
 - `unsync_repo(repo_id)` — removes every branch's job for that repo.
 - `sync_all()` (reconcile all repos' jobs), `trigger_now(repo, branch)`
   (fire-and-forget task for one branch).
@@ -541,7 +548,10 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
 - `query_pypi` (latest, last release, yanked, inactive classifier, repo URL),
   `query_npm` (latest, deprecated, time, repo URL), `query_github_repo` (archived,
   pushed_at, `moved_to` from an archived repo's "moved to <github url>"
-  description; uses `github_read_token`). `_apply_github` follows one move and
+  description; uses `scan_context.github_api_token()`. If GitHub rejects that
+  token (401: revoked or expired), the scan drops it, retries without one,
+  warns once in the scan log and counts `api.github.com:auth_rejected`).
+  `_apply_github` follows one move and
   ignores `archived` when the registry released after the repo's last push. `github_slug`/`pick_github_repo` normalise
   registry links (incl. `/issues`-style sub-pages) to `owner/repo`.
   `query_github_security_policy` reads SECURITY.md from raw.githubusercontent.com
@@ -608,6 +618,23 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   - `fetch_url` only accepts URLs a search returned and only reaches public
     addresses, re-checking every redirect, with time and size caps.
   - When the rounds run out, `tool_choice="none"` asks for the answer.
+  - In the public mode a custom base URL is a URL a user typed, so the SDK's
+    HTTP client is `safe_http.public_client()` (see below). The presets'
+    URLs are our own constants. Page fetches always use it.
+  - `list_models()` backs Test connection. It checks OpenRouter's key with
+    `GET /key` (its model list needs no key), keeps only tool-capable models
+    where the listing says, and puts free ones first.
+- `probe.py`: `test_connection(provider, api_key, base_url)` for
+  `POST /api/settings/ai-test`. Listing models costs no tokens with any
+  provider.
+- **`safe_http.py`** (not in `ai/`): `PublicOnlyTransport` resolves the host
+  itself on every request and refuses unless every address is public
+  (`git_rules.public_addresses`). It then connects to the address it checked,
+  keeping the hostname for TLS and the Host header, so a DNS answer that
+  changes after a check (DNS rebinding) can't redirect the request.
+  `public_client()` doesn't follow redirects or use environment proxies.
+  `settings_store.check_ai_base_url` checks the same things when the URL is
+  saved: https only, a hostname rather than an IP, no credentials in the URL.
 - `citations.py`:
   - every deprecated or eol verdict and every successor needs a citation,
     from every provider;
@@ -630,16 +657,44 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
 
 - **`main.tsx`** — mounts React, `QueryClientProvider`, AntD `ConfigProvider`,
   `BrowserRouter`.
-- **`App.tsx`** — layout + header (title + `SettingsToggle`) + routes: `/`,
-  `/repos/:id`, `/repos/:id/activity`, `/repos/:id/history`. The active branch
-  for the latter three is a `?branch=` **query param**, not part of the route
-  path (branch names can contain `/`), read/written via `useSearchParams`.
-- **`api.ts`** — typed `fetch` wrapper + `api.*` methods (repos CRUD,
-  scan/scan-status, scan-log, snapshots, components, report CSV URL, diff,
-  get/update settings). Every per-branch method (`scanNow`, `scanStatus`,
-  `scanLog`, `snapshots`, `components`, `reportCsvUrl`, `diff`) takes `branch`
-  as an explicit argument and sends it via `URLSearchParams` (never
-  string-concatenated — branch names need URL-encoding).
+- **`App.tsx`** — two kinds of routes:
+  - open to anyone: `/login`, `/privacy`, `/terms`;
+  - everything else, behind `SessionGate`: the header and `/`,
+    `/repos/:id`, `/repos/:id/activity`, `/repos/:id/history`, `/settings`,
+    `/members`, `/audit`, `/admin` and `/invite/:token`.
+
+  The header has the menu, the workspace switcher, invites for you, the theme
+  toggle and the account menu (the last three in the public mode only). The
+  active branch on the repo pages is a `?branch=` **query param**, not part
+  of the route path (branch names can contain `/`), read/written via
+  `useSearchParams`.
+- **`session.tsx`** — `SessionGate` loads `/api/me`:
+  - no session (401): a redirect to `/login?next=<this page>`;
+  - a remembered workspace you've since left (404): forgotten, and the
+    server falls back to the personal one;
+  - otherwise it provides `useSession()`: `me`, `can(perm, workspaceId?)`,
+    `why(perm, workspaceId?)` (the tooltip naming the role a control needs),
+    `switchWorkspace`, `signOut`.
+
+  Any later 401 from another call re-checks `/api/me`. A 401 from `/api/me`
+  itself must not, or a signed-out page would re-check forever.
+  `safeNext` keeps `next` on this site.
+- **`lib/permissions.ts`** — `can`, `minRole`, `needsRole`, `roleIn`. The role
+  table comes from `/api/me` (`role_permissions`), so it can't drift from the
+  server's. A repo's page asks about the repo's own workspace (`roleIn`),
+  since a link can open it while another workspace is active.
+- **`lib/aiSettings.ts`** — the providers the Settings page offers, and
+  `aiProblems()`: what stops AI research from running. "invalid" blocks
+  saving; "missing" only means research won't run yet. A saved key counts
+  only for the provider it was saved for.
+- **`api.ts`** — typed `fetch` wrapper + `api.*` methods. Every request sends
+  `X-Requested-With` and, once one is chosen, `X-Workspace`. The active
+  workspace is kept in `localStorage`, and switching clears the query cache:
+  query keys don't include the workspace. Every per-branch method
+  (`scanNow`, `scanStatus`, `scanLog`, `snapshots`, `components`,
+  `reportCsvUrl`, `diff`) takes `branch` as an explicit argument and sends
+  it via `URLSearchParams` (never string-concatenated — branch names need
+  URL-encoding).
 - **`types.ts`** — TS mirrors of the backend models + `FLAG_ORDER`. `Repo.branches:
   string[]`, `Repo.branches_info?: BranchInfo[]` (per-branch scan_state/
   flag_counts/latest_snapshot/last_scan, as returned by `GET /api/repos`).
@@ -659,7 +714,25 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   - `ScanActivity` / `SnapshotHistory` — same branch-selector pattern as
     `RepoDetail` (own `Select`, own `?branch=` sync), since both show
     branch-scoped history reached either directly via URL or via the links from
-    `RepoDetail`.
+    `RepoDetail`. `ScanActivity` also shows that scan's AI usage (`AiUsageCard`).
+  - Repos show `repo.name` (`format.repoName`); the public mode's ids are
+    random. Add, edit, delete and scan buttons are disabled by role, with a
+    tooltip naming the role needed.
+  - `Login` — Sign in with GitHub, the meaning of each `?error=` code, and the
+    "sign-ups are full" page.
+  - `Settings` — AI research (provider, key, Test connection, model, web
+    search) and the git tokens. Keys are write-only: only a hint shows. Read
+    only below Admin.
+  - `Members` — members and roles, invites by login or one-time link, pending
+    invites, and rename, transfer, delete and leave. A personal workspace
+    shows how to create a team instead.
+  - `Audit` — the workspace's log, paged by "Load older entries".
+  - `Admin` — users and workspaces, for platform admins only (a 404 page for
+    everyone else).
+  - `Invite` — accepts a one-time link (`/invite/:token`) and switches to
+    that workspace.
+  - `Legal` — the privacy policy and terms, drafts for the operator to
+    review. They read `OPERATOR_NAME` / `CONTACT_EMAIL` via `/api/info`.
 - **Components:** `ComponentTable` (filters + `hasTransitive`-gated Direct-only
   toggle + `hasUpdates`-gated Updates-only toggle; a **Latest stable** column
   carrying the `↑ update` tag, sortable to float upgradable packages to the top),
@@ -667,8 +740,9 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   `Select mode="tags"` — free-form entry, `type: "array", min: 1` validation;
   Docker image tags as a `VAR=image:tag` textarea — `tagsToText`/`textToTags`,
   prefilled from `detected_tag_vars`, client-side validation mirroring
-  `clean_image_tags`), `CitationsDrawer`, `SnapshotPicker`, `SettingsToggle`
-  (AI research on/off).
+  `clean_image_tags`), `CitationsDrawer`, `SnapshotPicker`, `HeaderControls`
+  (workspace switcher, invites for you, account menu with sign out and delete
+  account), `CreateWorkspaceModal`, `AiUsage`, `Brand`.
 
 Dev server proxies `/api` → backend (`VITE_API_TARGET`, default `:8000`).
 
@@ -742,6 +816,19 @@ Phase 2 added:
 - `test_rbac.py`: every route declares a permission, every role against
   every kind of route, the Owner and personal-workspace rules, invites,
   account deletion, the audit log, and the platform admin.
+
+Phase 3 added:
+- `test_settings_ai.py`: the base URL rules, the public-only transport
+  (including a DNS answer that changes after saving), Test connection and
+  its model lists, and each scan's AI usage in the scan log;
+- frontend: `lib/permissions.test.ts`, `lib/aiSettings.test.ts` (the Settings
+  form's validation), `session.test.ts` (`safeNext`), more of `api.test.ts`
+  (the workspace header, ended sessions), and `App.test.tsx`, which renders
+  the whole app against a fake backend: signed out, a session ending mid-use
+  (without bouncing between pages or re-checking forever), the sign-up cap
+  page, and a Viewer's disabled controls. It has no testing-library: React's
+  `act` and `createRoot` do the rendering. The first render of the whole app
+  is slow in jsdom, so it raises the test timeout.
 
 Each test gets a throwaway SQLite DB (schema from the ORM models);
 `TEST_DATABASE_URL=postgresql+psycopg://…` runs them on Postgres instead (via

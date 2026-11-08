@@ -6,7 +6,7 @@ import { api } from "../api";
 import { RepoTabs } from "../components/RepoTabs";
 import { FlagBadge, FlagCounts } from "../components/FlagBadge";
 import { flagRank } from "../flags";
-import { fmtSnapshotTs } from "../format";
+import { fmtSnapshotTs, repoName } from "../format";
 import type { SnapshotSummary } from "../types";
 
 export function SnapshotHistory() {
@@ -61,10 +61,10 @@ export function SnapshotHistory() {
         style={{ marginBottom: 12 }}
         items={[
           { title: <Link to="/">Repositories</Link> },
-          { title: <Link to={`/repos/${id}${branch ? `?branch=${encodeURIComponent(branch)}` : ""}`}>{id}</Link> },
+          { title: <Link to={`/repos/${id}${branch ? `?branch=${encodeURIComponent(branch)}` : ""}`}>{repoName(repo, id)}</Link> },
         ]}
       />
-      <Typography.Title level={3} style={{ margin: "0 0 8px" }}>{id}</Typography.Title>
+      <Typography.Title level={3} style={{ margin: "0 0 8px" }}>{repoName(repo, id)}</Typography.Title>
       <RepoTabs id={id} branch={branch} />
       <Space style={{ marginBottom: 16 }}>
         <Select

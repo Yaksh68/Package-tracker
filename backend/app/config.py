@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     platform_admins: str = ""
     max_users: int = 50
     session_days: int = 30
+    # Who runs this service, for the privacy policy and terms pages (shown
+    # to anyone, signed in or not).
+    operator_name: str = ""
+    contact_email: str = ""
 
     # Hosts repos may be cloned from, comma-separated; "*.example.com" allows
     # that domain's subdomains. Empty = any host, but only when auth_mode is

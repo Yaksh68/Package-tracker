@@ -1,13 +1,28 @@
 import type {
+  AdminUser,
+  AdminWorkspace,
+  AdminWorkspaceDetail,
+  AiTestResult,
+  AuditEvent,
   Component,
   DiffResult,
+  Invite,
+  Me,
+  Member,
   Repo,
   RepoCreate,
   RepoUpdate,
+  Role,
   ScanLog,
+  SecretHint,
+  SecretName,
+  ServiceInfo,
+  SettingsPatch,
   UploadRepoMeta,
   ScanStatus,
   SnapshotSummary,
+  Workspace,
+  WorkspaceSettings,
 } from "./types";
 
 /** A failed API call. `message` is already human-readable: FastAPI's `detail`
@@ -58,33 +73,73 @@ export async function parseError(res: Response): Promise<ApiError> {
  *  preflight, so this proves the request came from our own UI (CSRF). */
 export const CSRF_HEADERS = { "X-Requested-With": "packages-tracker" } as const;
 
-async function req<T>(url: string, init?: RequestInit): Promise<T> {
+// The active workspace, sent as X-Workspace on every request. Each browser
+// remembers its own; without one the server uses the personal workspace.
+const WORKSPACE_KEY = "packages-tracker.workspace";
+let activeWorkspace: string | null = (() => {
+  try {
+    return localStorage.getItem(WORKSPACE_KEY);
+  } catch {
+    return null; // storage blocked: the personal workspace it is
+  }
+})();
+
+export const getActiveWorkspace = () => activeWorkspace;
+
+/** Switch workspaces. Callers also drop cached queries: they're per workspace. */
+export function setActiveWorkspace(id: string | null) {
+  activeWorkspace = id;
+  try {
+    if (id) localStorage.setItem(WORKSPACE_KEY, id);
+    else localStorage.removeItem(WORKSPACE_KEY);
+  } catch {
+    /* storage blocked: the choice lasts until the page reloads */
+  }
+}
+
+// Called on a 401 from any call but /api/me: the session ended (signed out
+// elsewhere, expired, or the account was disabled). The session gate re-checks
+// /api/me and shows sign-in. A 401 from /api/me is that check's own answer;
+// passing it on would re-check forever.
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  onUnauthorized = fn;
+}
+
+function baseHeaders(): Record<string, string> {
+  return { ...CSRF_HEADERS, ...(activeWorkspace ? { "X-Workspace": activeWorkspace } : {}) };
+}
+
+async function send(url: string, init: RequestInit): Promise<Response> {
   let res: Response;
   try {
-    res = await fetch(url, {
-      ...init,
-      headers: { "Content-Type": "application/json", ...CSRF_HEADERS, ...(init?.headers ?? {}) },
-    });
+    res = await fetch(url, init);
   } catch {
     throw new ApiError(0, "Backend unreachable — is packages-tracker-backend running?");
   }
+  if (res.status === 401 && url !== "/api/me") onUnauthorized?.();
   if (!res.ok) throw await parseError(res);
+  return res;
+}
+
+async function req<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await send(url, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...baseHeaders(), ...(init?.headers ?? {}) },
+  });
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
 /** multipart/form-data POST — the browser sets the Content-Type boundary. */
 async function postForm<T>(url: string, form: FormData): Promise<T> {
-  let res: Response;
-  try {
-    // no Content-Type: the browser sets the multipart boundary itself
-    res = await fetch(url, { method: "POST", body: form, headers: { ...CSRF_HEADERS } });
-  } catch {
-    throw new ApiError(0, "Backend unreachable — is packages-tracker-backend running?");
-  }
-  if (!res.ok) throw await parseError(res);
+  // no Content-Type: the browser sets the multipart boundary itself
+  const res = await send(url, { method: "POST", body: form, headers: baseHeaders() });
   return res.json() as Promise<T>;
 }
+
+const json = (body: unknown): RequestInit => ({ body: JSON.stringify(body) });
+const enc = encodeURIComponent;
 
 /** Human-readable message for anything thrown by an API call or mutation. */
 export function errorMessage(e: unknown): string {
@@ -93,17 +148,71 @@ export function errorMessage(e: unknown): string {
 }
 
 export const isNotFound = (e: unknown) => e instanceof ApiError && e.status === 404;
+export const isUnauthorized = (e: unknown) => e instanceof ApiError && e.status === 401;
 export const isClientError = (e: unknown) => e instanceof ApiError && e.status >= 400 && e.status < 500;
 
-export interface AppSettings {
-  use_enrichment_agent: boolean;
-  use_extraction_agent: boolean;
-}
-
 export const api = {
-  getSettings: () => req<AppSettings>("/api/settings"),
-  updateSettings: (patch: Partial<AppSettings>) =>
-    req<AppSettings>("/api/settings", { method: "PUT", body: JSON.stringify(patch) }),
+  // ---- the service and the signed-in account ----
+  info: () => req<ServiceInfo>("/api/info"),
+  me: () => req<Me>("/api/me"),
+  deleteAccount: () => req<void>("/api/me", { method: "DELETE" }),
+  logout: () => req<void>("/api/auth/logout", { method: "POST" }),
+  /** Where the "Sign in with GitHub" button goes; `next` is where to land after. */
+  loginUrl: (next?: string) =>
+    `/api/auth/github/login${next && next !== "/" ? `?${new URLSearchParams({ next })}` : ""}`,
+
+  // ---- the active workspace's settings and secrets ----
+  getSettings: () => req<WorkspaceSettings>("/api/settings"),
+  updateSettings: (patch: SettingsPatch) =>
+    req<WorkspaceSettings>("/api/settings", { method: "PUT", ...json(patch) }),
+  setSecret: (name: SecretName, value: string) =>
+    req<{ name: SecretName } & SecretHint>(`/api/secrets/${name}`, { method: "PUT", ...json({ value }) }),
+  deleteSecret: (name: SecretName) => req<void>(`/api/secrets/${name}`, { method: "DELETE" }),
+  /** Test connection: the provider's models with this key (typed, or else the saved one). */
+  testAi: (body: { provider: string; base_url?: string; api_key?: string }) =>
+    req<AiTestResult>("/api/settings/ai-test", { method: "POST", ...json(body) }),
+
+  // ---- workspaces, members, invites, audit log ----
+  workspaces: () => req<Workspace[]>("/api/workspaces"),
+  createWorkspace: (name: string) => req<Workspace>("/api/workspaces", { method: "POST", ...json({ name }) }),
+  renameWorkspace: (id: string, name: string) =>
+    req<{ id: string; name: string }>(`/api/workspaces/${enc(id)}`, { method: "PUT", ...json({ name }) }),
+  deleteWorkspace: (id: string) => req<void>(`/api/workspaces/${enc(id)}`, { method: "DELETE" }),
+  transferWorkspace: (id: string, userId: string) =>
+    req<unknown>(`/api/workspaces/${enc(id)}/transfer`, { method: "POST", ...json({ user_id: userId }) }),
+  leaveWorkspace: (id: string) => req<void>(`/api/workspaces/${enc(id)}/leave`, { method: "POST" }),
+  members: (id: string) => req<Member[]>(`/api/workspaces/${enc(id)}/members`),
+  setRole: (id: string, userId: string, role: Role) =>
+    req<unknown>(`/api/workspaces/${enc(id)}/members/${enc(userId)}`, { method: "PUT", ...json({ role }) }),
+  removeMember: (id: string, userId: string) =>
+    req<void>(`/api/workspaces/${enc(id)}/members/${enc(userId)}`, { method: "DELETE" }),
+  invites: (id: string) => req<Invite[]>(`/api/workspaces/${enc(id)}/invites`),
+  /** By GitHub login, or (no login) a one-time link whose `url` is returned only now. */
+  createInvite: (id: string, role: Role, githubLogin?: string) =>
+    req<Invite>(`/api/workspaces/${enc(id)}/invites`, {
+      method: "POST",
+      ...json({ role, github_login: githubLogin || null }),
+    }),
+  revokeInvite: (id: string, inviteId: string) =>
+    req<void>(`/api/workspaces/${enc(id)}/invites/${enc(inviteId)}`, { method: "DELETE" }),
+  myInvites: () => req<Invite[]>("/api/invites"),
+  acceptInvite: (inviteId: string) => req<Invite>(`/api/invites/${enc(inviteId)}/accept`, { method: "POST" }),
+  declineInvite: (inviteId: string) => req<Invite>(`/api/invites/${enc(inviteId)}/decline`, { method: "POST" }),
+  acceptInviteLink: (token: string) => req<Invite>("/api/invites/accept-link", { method: "POST", ...json({ token }) }),
+  audit: (id: string, before?: number, limit = 50) =>
+    req<AuditEvent[]>(
+      `/api/workspaces/${enc(id)}/audit?${new URLSearchParams({ limit: String(limit), ...(before ? { before: String(before) } : {}) })}`,
+    ),
+
+  // ---- the platform admin ----
+  adminUsers: () => req<AdminUser[]>("/api/admin/users"),
+  setUserStatus: (userId: string, status: "active" | "disabled") =>
+    req<unknown>(`/api/admin/users/${enc(userId)}`, { method: "PUT", ...json({ status }) }),
+  adminDeleteUser: (userId: string) => req<void>(`/api/admin/users/${enc(userId)}`, { method: "DELETE" }),
+  adminWorkspaces: () => req<AdminWorkspace[]>("/api/admin/workspaces"),
+  adminWorkspace: (id: string) => req<AdminWorkspaceDetail>(`/api/admin/workspaces/${enc(id)}`),
+
+  // ---- repos and scans ----
 
   listRepos: () => req<Repo[]>("/api/repos"),
   getRepo: (id: string) => req<Repo>(`/api/repos/${id}`),

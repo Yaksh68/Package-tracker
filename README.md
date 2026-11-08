@@ -9,8 +9,14 @@ planned release**. Each scan is saved as a timestamped snapshot so you can see
 
 - **Backend**: FastAPI + APScheduler, PostgreSQL (SQLAlchemy 2.0 + psycopg 3 + Alembic)
 - **Frontend**: React + Vite + TypeScript + Ant Design + TanStack Query
-- **AI**: two agents (extraction + EOL research) that run on your **Claude Code
-  subscription login** — **no `ANTHROPIC_API_KEY`.** Docker runs only PostgreSQL.
+- **AI** (optional; every scan runs without it): EOL research for the packages
+  the structured sources can't answer. Locally it can use your **Claude Code
+  login**. Otherwise each workspace brings its own key for Anthropic, OpenAI,
+  Gemini, Groq, OpenRouter or any OpenAI-compatible API, set on the Settings
+  page. Docker runs only PostgreSQL.
+- **Two modes**: `AUTH_MODE=none` (default) is a single local user. `AUTH_MODE=github`
+  is the public multi-user service: Sign in with GitHub, team workspaces with
+  roles, invites, an audit log and a platform admin area.
 
 ## How the AI auth works (important)
 
@@ -113,6 +119,7 @@ branch, planned release date, and interval. The first scan starts immediately.
 | `PLATFORM_ADMINS` | Comma-separated GitHub logins with platform-admin rights: the `/api/admin` routes (users and workspaces across the service). They can always sign up, and they get the repos from before the public mode |
 | `MAX_USERS` | Sign-up cap (default 50) |
 | `SESSION_DAYS` | How long a session lasts (default 30) |
+| `OPERATOR_NAME` / `CONTACT_EMAIL` | Who runs the service, shown on the privacy policy and terms pages |
 | `GIT_HOST_ALLOWLIST` | Comma-separated hosts repos may be cloned from (`*.example.com` = subdomains). Empty = any host in the local mode; the public mode defaults to github.com, gitlab.com, bitbucket.org, codeberg.org |
 | `CLONE_TIMEOUT_SECONDS` | Kill a clone that runs longer than this (default 120) |
 | `IMAGE_INSPECT` | Docker image inventory: `auto` (default: use Docker when it's there, otherwise skip without degrading the scan), `on`, or `off`. Always off in the public mode |
@@ -201,6 +208,7 @@ to run against Postgres (tables are truncated between tests — use a scratch DB
 | GET | `/api/repos/{id}/snapshots/{ts}/report.csv` | CSV export (built on request) |
 | GET | `/api/repos/{id}/diff?from=&to=` | status changes between snapshots |
 | GET/PUT | `/api/settings` | the active workspace's settings (AI research on/off, AI provider, model, search provider) plus which secrets are set. Admins and Owners also see each secret's hint |
+| POST | `/api/settings/ai-test` | Test connection: `{provider, base_url?, api_key?}` → the provider's models, or why it refused (`ok: false`, a `kind` and a message). Uses the typed key, else the saved one. Costs no tokens |
 | PUT/DELETE | `/api/secrets/{name}` | save or remove a workspace secret: `ai_api_key`, `search_api_key`, `github_token`, `gitlab_token`. Write-only: values are never returned |
 | GET/DELETE | `/api/me` | the caller, their active workspace, their role and permissions there, and their workspaces; DELETE deletes the account (public mode) |
 | GET/POST | `/api/workspaces` | your workspaces; create a team workspace (public mode) |
@@ -217,7 +225,8 @@ to run against Postgres (tables are truncated between tests — use a scratch DB
 | GET | `/api/admin/users` | platform admin: every user |
 | PUT/DELETE | `/api/admin/users/{id}` | platform admin: disable or enable (`{"status": "disabled"}` also signs them out); delete |
 | GET | `/api/admin/workspaces`, `/api/admin/workspaces/{id}` | platform admin: every workspace with member and repo counts; one workspace's members and repos (metadata only, and recorded in that workspace's audit log) |
-| GET | `/api/auth/github/login`, `/api/auth/github/callback` | Sign in with GitHub (public mode) |
+| GET | `/api/info` | open to anyone: the mode, and the operator's name and contact |
+| GET | `/api/auth/github/login?next=/page`, `/api/auth/github/callback` | Sign in with GitHub (public mode), returning to `next` (a path on this site). A failed sign-in lands on `/login?error=` `cancelled`, `expired`, `github`, `disabled` or `full` |
 | POST | `/api/auth/logout` | end the session |
 
 In the public mode, every `/api` call except health and sign-in needs a session cookie. Data-changing calls also need the header `X-Requested-With: packages-tracker`, and `X-Workspace: <id>` picks the workspace (the default is your personal one). Repos and workspaces you're not in return 404, and the admin routes return 404 to everyone but the platform admins.

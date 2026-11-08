@@ -71,6 +71,42 @@ async def test_query_github_repo_reports_the_move():
     assert r["archived"] and r["moved_to"].endswith("/packages/google-crc32c")
 
 
+async def test_a_rejected_token_is_dropped_for_the_rest_of_the_scan(monkeypatch):
+    """A revoked or expired token gets 401 on every call: retry without it,
+    say so once, and stop sending it."""
+    from app import scan_context, scanlog
+
+    sent = []
+
+    def handler(request):
+        auth = request.headers.get("authorization")
+        sent.append(auth)
+        if auth:
+            return httpx.Response(401, json={"message": "Bad credentials"})
+        return httpx.Response(200, json={"archived": False, "pushed_at": "2026-04-01T20:26:51Z",
+                                         "full_name": "a/b", "html_url": "https://github.com/a/b"})
+
+    ctx = scan_context.ScanContext(workspace_id="local")
+    monkeypatch.setattr(ctx, "github_api_token", lambda: ctx._cached("github_api_token", lambda: "gho_revoked"))
+    scan_context.bind(ctx)
+    log = scanlog.start("r", "main")
+    tally = sa.start_error_tally()
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            first = await REAL_QUERY(c, "a/b")
+            second = await REAL_QUERY(c, "c/d")
+    finally:  # don't leak this scan's context into other tests
+        scan_context.bind(None)
+        scanlog._current.set(None)
+        scanlog.clear_repo("r")
+        sa._upstream_errors.set(None)
+    assert first["found"] and second["found"]
+    assert sent == ["Bearer gho_revoked", None, None]  # tried once, then without it
+    assert tally == {"api.github.com:auth_rejected": 1}
+    warnings = [e.message for e in log.entries if e.level == "warn"]
+    assert len(warnings) == 1 and "rejected the token" in warnings[0]
+
+
 async def test_google_crc32c_moved_into_monorepo_is_not_deprecated():
     e = await _enrich("googleapis/python-crc32c", "1.8.0", dt.date(2026, 9, 24), "1.9.0")
     assert e.archived is False and e.verdict == Verdict.supported

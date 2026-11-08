@@ -104,20 +104,34 @@ def check_branch(branch: str) -> str:
     return b
 
 
-def require_public_address(host: str) -> None:
-    """Raise RepoUrlError unless every address `host` resolves to is a public
-    one. That excludes private, loopback, link-local, CGNAT and reserved
-    ranges, so a URL can't be used to reach internal services. For cloning,
-    the host allowlist is the main control and this is a second layer behind
-    it. The AI's fetch_url tool uses it too. Blocking: call it from a worker
-    thread inside async code."""
+def public_addresses(host: str) -> list[str]:
+    """The addresses `host` resolves to, IPv4 first. Raises RepoUrlError
+    unless every one of them is public, which excludes private, loopback,
+    link-local (cloud metadata), CGNAT and reserved ranges, so a URL can't be
+    used to reach internal services. Blocking: call it from a worker thread
+    inside async code."""
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as e:
         raise RepoUrlError(f"could not resolve {host}: {e}") from e
+    found: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
     for info in infos:
         ip = ipaddress.ip_address(str(info[4][0]).split("%")[0])
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
         if not ip.is_global:
             raise RepoUrlError(f"{host} resolves to a non-public address ({ip}), which isn't allowed")
+        if ip not in found:
+            found.append(ip)
+    if not found:
+        raise RepoUrlError(f"could not resolve {host}")
+    # IPv4 first: many cloud VMs have no IPv6 route
+    return [str(ip) for ip in sorted(found, key=lambda ip: ip.version)]
+
+
+def require_public_address(host: str) -> None:
+    """Raise RepoUrlError unless every address `host` resolves to is public
+    (see public_addresses). For cloning, the host allowlist is the main
+    control and this is a second layer behind it. The AI's fetch_url tool
+    uses it too."""
+    public_addresses(host)

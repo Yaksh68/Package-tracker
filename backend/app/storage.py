@@ -312,6 +312,15 @@ def list_scan_runs(repo_id: str | None = None, *, limit: int = 100) -> list[Scan
         return [ScanRunRecord.model_validate(r, from_attributes=True) for r in rows]
 
 
+def scan_run_for(repo_id: str, branch: str, snapshot_ts: str) -> ScanRunRecord | None:
+    """The recorded run that produced this snapshot, if any."""
+    with session() as s:
+        row = s.scalars(select(ScanRunRow).where(
+            ScanRunRow.repo_id == repo_id, ScanRunRow.branch == branch,
+            ScanRunRow.snapshot_ts == snapshot_ts).order_by(ScanRunRow.id.desc()).limit(1)).first()
+        return ScanRunRecord.model_validate(row, from_attributes=True) if row else None
+
+
 def _strip_nul(v):
     """Postgres text/JSONB reject NUL characters, which upstream metadata (an npm
     deprecation message, a scraped summary) can contain. Files stored them; a

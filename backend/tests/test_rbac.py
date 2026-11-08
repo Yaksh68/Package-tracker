@@ -15,7 +15,7 @@ from app.main import app
 from app.models import Repo
 
 CSRF = {"X-Requested-With": "packages-tracker"}
-PUBLIC_ROUTES = {("GET", "/api/health"), ("GET", "/api/auth/github/login"),
+PUBLIC_ROUTES = {("GET", "/api/health"), ("GET", "/api/info"), ("GET", "/api/auth/github/login"),
                  ("GET", "/api/auth/github/callback"), ("POST", "/api/auth/logout")}
 
 
@@ -122,6 +122,7 @@ MATRIX = [
     (("put", "/api/repos/team-repo", {"release_date": "2027-01-01"}), EDITORS),
     (("post", "/api/repos/team-repo/scan?branch=main", None), EDITORS),
     (("put", "/api/settings", {"use_enrichment_agent": True}), ADMINS),
+    (("post", "/api/settings/ai-test", {"provider": "claude-cli"}), ADMINS),
     (("put", "/api/secrets/ai_api_key", {"value": "sk-ant-api03-zzzz1234"}), ADMINS),
     (("post", "/api/workspaces/{ws}/invites", {"role": "viewer", "github_login": "someone"}), ADMINS),
     (("get", "/api/workspaces/{ws}/invites", None), ADMINS),
@@ -178,6 +179,7 @@ def test_me_reports_the_role_and_permissions(team):
     _, clients = team
     me = clients["editor"][0].get("/api/me").json()
     assert me["role"] == "editor" and me["permissions"] == ["edit", "scan", "view"]
+    assert me["role_permissions"]["admin"] == rbac.permissions("admin")
 
 
 # --------------------------------------------------------------------------- #

@@ -58,6 +58,11 @@ export function fmtDue(v?: string | null): string {
   return `overdue ${span(-secs)}`;
 }
 
+/** What to call a repo: its name, else its id (the public mode's ids are random). */
+export function repoName(repo?: { id: string; name?: string | null } | null, fallbackId = ""): string {
+  return repo?.name || repo?.id || fallbackId;
+}
+
 /** Local time only, for dense logs. */
 export function fmtTime(v?: string | null): string {
   const d = toDate(v);

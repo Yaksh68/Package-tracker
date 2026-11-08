@@ -116,6 +116,29 @@ async def test_overdue_branches_are_caught_up_promptly(last_scan):
 
 
 @pytest.mark.asyncio
+async def test_a_branch_scanning_now_is_scheduled_one_interval_out():
+    """A new repo's first scan starts at once; a catch-up 30 s later would
+    scan it again (and spend the workspace's AI quota twice)."""
+    scheduler.sync_repo(_repo("fresh", interval=7), scanning_now={"main"})
+    assert _hours_until(_job("fresh", "main").next_run_time) == pytest.approx(7 * 24, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_a_due_scan_skips_a_branch_that_is_already_scanning(monkeypatch):
+    from app import audit, storage
+    storage.upsert_repo(_repo("busy"))
+    ran = []
+
+    async def fake_run(*a, **kw):
+        ran.append(a)
+
+    monkeypatch.setattr(scheduler, "is_scanning", lambda repo_id, branch: True)
+    monkeypatch.setattr(scheduler, "run_scan", fake_run)
+    await scheduler._scan_job("busy", "main")
+    assert ran == [] and audit.events("local") == []
+
+
+@pytest.mark.asyncio
 async def test_overdue_branches_are_staggered_not_stampeded():
     """Each catch-up is a clone plus AI enrichment, so several overdue branches
     must not all fire at the same instant."""

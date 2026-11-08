@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 import httpx
 from packaging.version import InvalidVersion, Version
 
-from .. import scan_context
+from .. import scan_context, scanlog
 from ..config import get_settings
 
 _EOL_BASE = "https://endoflife.date/api/v1"
@@ -379,7 +379,18 @@ async def query_github_repo(client: httpx.AsyncClient, owner_repo: str) -> dict:
     token = scan_context.github_api_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    data = await _get_json(client, f"https://api.github.com/repos/{slug}", headers=headers)
+    url = f"https://api.github.com/repos/{slug}"
+    data = await _get_json(client, url, headers=headers)
+    if token and isinstance(data, dict) and data.get("__status__") == 401:
+        # GitHub refused the token (revoked or expired): count it, say so once,
+        # and carry on without it (a lower rate limit beats no data)
+        _tally(url, "auth_rejected")
+        if scan_context.reject_github_api_token():
+            scanlog.emit("source", "GitHub rejected the token for API lookups (revoked or expired?); "
+                         "continuing without one, at GitHub's lower anonymous rate limit. "
+                         "Signing in again, or a new GitHub token in Settings, fixes this.", level="warn")
+        headers.pop("Authorization")
+        data = await _get_json(client, url, headers=headers)
     if not isinstance(data, dict) or data.get("__status__") or "archived" not in data:
         return {"found": False, "status": (data or {}).get("__status__")}
     return {

@@ -69,6 +69,14 @@ class ScanContext:
             return None if s.public_mode() else s.github_read_token()
         return self._cached("github_api_token", compute)
 
+    def reject_github_api_token(self) -> bool:
+        """GitHub refused the token (revoked, expired): the rest of this scan
+        goes without one. True the first time, so the caller can say so once."""
+        if self._memo.get("github_api_token", _MISSING) is None:
+            return False
+        self._memo["github_api_token"] = None
+        return True
+
 
 _current: contextvars.ContextVar[ScanContext | None] = contextvars.ContextVar("scan_context", default=None)
 
@@ -96,3 +104,10 @@ def git_token(host: str) -> str | None:
 def github_api_token() -> str | None:
     ctx = _current.get() or ScanContext()
     return ctx.github_api_token()
+
+
+def reject_github_api_token() -> bool:
+    """See ScanContext.reject_github_api_token. Outside a scan there's nothing
+    to remember it in, so it's False."""
+    ctx = _current.get()
+    return ctx.reject_github_api_token() if ctx else False

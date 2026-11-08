@@ -15,6 +15,7 @@ from .api.routes import router
 from .api.workspaces import router as workspaces_router
 from .auth import CsrfMiddleware
 from .auth import router as auth_router
+from .config import get_settings
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("packages-tracker")
@@ -56,3 +57,11 @@ app.include_router(admin_router)
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/info")
+def info() -> dict:
+    """Public facts for pages anyone can open (sign-in, privacy, terms)."""
+    s = get_settings()
+    return {"mode": "github" if s.public_mode() else "local",
+            "operator_name": s.operator_name or None, "contact_email": s.contact_email or None}
