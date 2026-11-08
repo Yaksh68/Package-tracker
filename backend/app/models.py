@@ -439,6 +439,8 @@ class ScanStatus(BaseModel):
     # stays as the single-line summary for compact call sites.
     degraded: bool = False
     issues: list[ScanIssue] = Field(default_factory=list)
+    # while queued: 1 = next to start (scan_queue.py)
+    queue_position: int | None = None
 
 
 class LogEntry(BaseModel):

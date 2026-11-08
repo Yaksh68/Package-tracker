@@ -14,6 +14,7 @@ import type {
   RepoUpdate,
   Role,
   ScanLog,
+  ScanRequest,
   SecretHint,
   SecretName,
   ServiceInfo,
@@ -240,7 +241,7 @@ export const api = {
   // Branch names can contain "/" (e.g. release/6.1), so it's always a query
   // param — never a path segment — and URLSearchParams-encoded.
   scanNow: (id: string, branch: string) =>
-    req<{ status: string }>(`/api/repos/${id}/scan?${new URLSearchParams({ branch })}`, { method: "POST" }),
+    req<ScanRequest>(`/api/repos/${id}/scan?${new URLSearchParams({ branch })}`, { method: "POST" }),
   scanStatus: (id: string, branch: string) =>
     req<ScanStatus>(`/api/repos/${id}/scan-status?${new URLSearchParams({ branch })}`),
   scanLog: (id: string, branch: string, ts?: string) =>

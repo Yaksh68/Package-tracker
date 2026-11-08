@@ -124,18 +124,24 @@ async def test_a_branch_scanning_now_is_scheduled_one_interval_out():
 
 
 @pytest.mark.asyncio
-async def test_a_due_scan_skips_a_branch_that_is_already_scanning(monkeypatch):
-    from app import audit, storage
+async def test_a_due_scan_skips_a_branch_that_is_already_queued_or_scanning(monkeypatch):
+    from app import audit, scan_queue, storage
     storage.upsert_repo(_repo("busy"))
-    ran = []
-
-    async def fake_run(*a, **kw):
-        ran.append(a)
-
-    monkeypatch.setattr(scheduler, "is_scanning", lambda repo_id, branch: True)
-    monkeypatch.setattr(scheduler, "run_scan", fake_run)
+    monkeypatch.setattr(scan_queue, "enqueue", lambda repo, branch, trigger="manual": False)
     await scheduler._scan_job("busy", "main")
-    assert ran == [] and audit.events("local") == []
+    assert audit.events("local") == []  # nothing was queued, so nothing is recorded
+
+
+@pytest.mark.asyncio
+async def test_a_due_scan_is_queued_and_recorded(monkeypatch):
+    from app import audit, scan_queue, storage
+    storage.upsert_repo(_repo("due"))
+    queued = []
+    monkeypatch.setattr(scan_queue, "enqueue",
+                        lambda repo, branch, trigger="manual": queued.append((repo.id, branch, trigger)) or True)
+    await scheduler._scan_job("due", "main")
+    assert queued == [("due", "main", "scheduled")]
+    assert [e["action"] for e in audit.events("local")] == ["scan.scheduled"]
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     git_host_allowlist: str = ""
     # A clone running longer than this is killed.
     clone_timeout_seconds: int = 120
+    # How many scans run at once (scan_queue.py). In the public mode a
+    # workspace runs one at a time, taking turns with the others.
+    scan_workers: int = 2
 
     # Docker image inventory: "auto" (use Docker when it's there, else skip
     # quietly), "on" (always try; a missing Docker degrades the scan) or "off".

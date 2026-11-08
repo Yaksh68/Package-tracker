@@ -67,7 +67,7 @@ function BranchRow({ repoId, info }: { repoId: string; info: BranchInfo }) {
       <Space direction="vertical" size={6} style={{ width: "100%" }}>
         <Space size={10} wrap>
           <Typography.Text strong>{info.branch}</Typography.Text>
-          <ScanStatusPill state={info.scan_state} />
+          <ScanStatusPill state={info.scan_state} position={info.queue_position} />
           {info.degraded && info.scan_state !== "error" && (
             <Tooltip title={degradedDetail(info)}>
               <Tag color="gold" icon={<WarningOutlined />}>incomplete</Tag>

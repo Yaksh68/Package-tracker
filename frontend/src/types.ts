@@ -19,6 +19,8 @@ export interface BranchInfo {
   degraded?: boolean;
   /** Detail behind `degraded` — in-memory, so empty after a backend restart. */
   issues?: ScanIssue[];
+  /** While queued: 1 = next to start. */
+  queue_position?: number | null;
 }
 
 export interface Repo {
@@ -138,6 +140,16 @@ export interface ScanStatus {
   snapshot_ts: string | null;
   degraded: boolean;
   issues: ScanIssue[];
+  /** While queued: 1 = next to start. */
+  queue_position?: number | null;
+}
+
+/** POST /repos/{id}/scan. `merged`: that branch was already queued or
+ *  running, so no new scan was added. */
+export interface ScanRequest {
+  status: "queued" | "running";
+  merged: boolean;
+  queue_position: number | null;
 }
 
 export interface LogEntry {

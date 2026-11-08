@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from .. import accounts, audit, rbac, scanlog, scheduler, settings_store, storage, uploads
+from .. import accounts, audit, rbac, scan_queue, scanlog, scheduler, settings_store, storage, uploads
 from .. import flags as flags_mod
 from ..ai import probe
 from ..ai.errors import AiError, redact_keys
@@ -225,6 +225,7 @@ def list_repos(me: Principal = Depends(get_principal)) -> list[dict]:
                 "latest_snapshot": idx[0].ts if idx else None,
                 "flag_counts": idx[0].flag_counts if idx else {},
                 "scan_state": status.state.value,
+                "queue_position": scan_queue.position(r.id, b),
                 "last_scan": last_scan.isoformat() if last_scan else None,
                 "next_scan": nxt.isoformat() if nxt else None,
                 # Degraded survives a restart via the snapshot index; the issue
@@ -350,15 +351,18 @@ async def scan_now(repo_id: str, branch: str = Query(...),
                    me: Principal = Depends(get_principal)) -> dict:
     repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
-    if is_scanning(repo_id, branch):
-        raise HTTPException(409, "a scan is already in progress")
     if repo.source == "upload" and not uploads.has_upload(repo_id, branch):
         raise HTTPException(400, f"no zip uploaded for version '{branch}' yet")
+    if scan_queue.busy(repo_id, branch):
+        # merged into the scan that's already queued or running: nothing new happens
+        return {"status": "running" if is_scanning(repo_id, branch) else "queued", "merged": True,
+                "repo_id": repo_id, "branch": branch, "queue_position": scan_queue.position(repo_id, branch)}
     scheduler.trigger_now(repo, branch, trigger="manual")
     _audit(me, "scan.manual", workspace_id=repo.workspace_id, target_type="repo",
            target_id=repo.id, branch=branch)
     _event(me, "manual_scan")
-    return {"status": "queued", "repo_id": repo_id, "branch": branch}
+    return {"status": "queued", "merged": False, "repo_id": repo_id, "branch": branch,
+            "queue_position": scan_queue.position(repo_id, branch)}
 
 
 # --------------------------------------------------------------------------- #
@@ -444,7 +448,8 @@ def scan_status(repo_id: str, branch: str = Query(...),
                 me: Principal = Depends(get_principal)) -> ScanStatus:
     repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
-    return get_status(repo_id, branch)
+    return get_status(repo_id, branch).model_copy(
+        update={"queue_position": scan_queue.position(repo_id, branch)})
 
 
 @router.get("/repos/{repo_id}/scan-log")

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import accounts, crypto, db, scheduler, storage
+from . import accounts, crypto, db, scan_queue, scheduler, storage
 from .api.admin import router as admin_router
 from .api.routes import router
 from .api.workspaces import router as workspaces_router
@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         scheduler.shutdown()
+        scan_queue.shutdown()
 
 
 app = FastAPI(title="Packages Tracker", version="0.1.0", lifespan=lifespan)

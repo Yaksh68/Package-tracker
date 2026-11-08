@@ -16,15 +16,13 @@ Docker + `claude setup-token` path would make it survive reboots.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import audit, storage, uploads
+from . import audit, scan_queue, storage, uploads
 from .models import Repo
-from .pipeline import is_scanning, run_scan
 
 log = logging.getLogger("packages-tracker.scheduler")
 _scheduler: AsyncIOScheduler | None = None
@@ -60,14 +58,13 @@ async def _scan_job(repo_id: str, branch: str) -> None:
         return
     if repo.source == "upload" and not uploads.has_upload(repo_id, branch):
         return  # nothing to scan until a zip is uploaded for this version
-    if is_scanning(repo_id, branch):
-        # e.g. a manual scan got there first; recording this as a scan would mislead
-        log.info("scheduled scan for %s @ %s skipped: already scanning", repo_id, branch)
+    if not scan_queue.enqueue(repo, branch, "scheduled"):
+        # already queued or running (e.g. a manual scan got there first)
+        log.info("scheduled scan for %s @ %s skipped: already queued or scanning", repo_id, branch)
         return
-    log.info("scheduled scan starting for %s @ %s", repo_id, branch)
+    log.info("scheduled scan queued for %s @ %s", repo_id, branch)
     audit.record("scan.scheduled", workspace_id=repo.workspace_id, actor_kind="scheduler",
                  target_type="repo", target_id=repo.id, branch=branch)
-    await run_scan(repo, branch, trigger="scheduled")
 
 
 def start() -> AsyncIOScheduler:
@@ -175,7 +172,8 @@ def sync_all() -> None:
             pass
 
 
-def trigger_now(repo: Repo, branch: str, *, trigger: str = "manual") -> None:
-    """Fire a scan in the background without waiting. `trigger` records why it
-    ran (manual / initial / upload) on the scan's `scan_runs` row."""
-    asyncio.create_task(run_scan(repo, branch, trigger=trigger))
+def trigger_now(repo: Repo, branch: str, *, trigger: str = "manual") -> bool:
+    """Queue a scan (scan_queue.py) without waiting for it. `trigger` records
+    why it ran (manual / initial / upload) on the scan's `scan_runs` row.
+    False when that branch was already queued or running."""
+    return scan_queue.enqueue(repo, branch, trigger)
