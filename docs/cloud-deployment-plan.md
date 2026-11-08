@@ -1,6 +1,6 @@
 # Cloud deployment: public multi-user Packages Tracker (implementation plan)
 
-> **Status:** draft for review. Each phase below ships as its own branch and pull request.
+> **Status:** Phases 0 and 1 are merged (2026-11-07). Phase 2a is done on `phase-2a-accounts` (2026-11-08). Each phase ships as its own branch and pull request.
 >
 > **Decisions locked (2026-11-07):**
 > 1. **Public multi-user service.** People sign in, work in **workspaces** (teams), and bring their own AI keys.
@@ -9,7 +9,7 @@
 > 4. **AI is optional.** Every scan runs fully on the structured sources. AI only fills in ambiguous packages, and an AI failure never throws away the non-AI results.
 > 5. **Several AI providers, including free tiers.** There are two adapters. One is a native Anthropic adapter. The other is an OpenAI-compatible adapter (OpenAI, Gemini, Groq, OpenRouter, any custom URL) that runs its own web search through Tavily or Exa.
 > 6. **Hosting:** one Oracle Cloud Always Free VM running Docker Compose (app + Postgres + Caddy).
-> 7. **Today's VM keeps working unchanged** in `AUTH_MODE=none` (no login, Claude CLI allowed).
+> 7. **`AUTH_MODE=none` stays the local and self-hosted mode** (no login, Claude CLI allowed). The internal VM turned out to run separate code, so it's out of scope (decided 2026-11-07), and phases are verified on the dev machine instead.
 > 8. **Admin analytics are built into the app.** Events are recorded server-side in our own Postgres, and the page shows only aggregates and metadata.
 > 9. **The repo stays private.** Runtime data stops being tracked from Phase 0 on, and history is not rewritten.
 > 10. **Delivery:** one branch per phase, pushed to GitHub and reviewed as a pull request.
@@ -27,7 +27,7 @@
 | Limits | See the Phase 4 table | 4 |
 | Alerts | Not in v1 | 6 |
 | "Common EOL packages" panel | On, but it only shows packages found in 5 or more workspaces | 6 |
-| Existing data | Stays on the VM, and the cloud database starts empty. The cloud can't reach your internal GitLab repos. | 5 |
+| Existing data | The cloud database starts empty. The internal VM and its GitLab repos are out of scope. | 5 |
 
 ## Target architecture
 
@@ -49,7 +49,7 @@ Everything stays in one process. Scan status, locks and the live scan log are ke
 
 ## One codebase, two modes
 
-| | `AUTH_MODE=none`: your VM today | `AUTH_MODE=github`: the cloud |
+| | `AUTH_MODE=none`: local / self-hosted | `AUTH_MODE=github`: the cloud |
 |---|---|---|
 | Login | None | Sign in with GitHub |
 | Workspaces | One built-in workspace, with the local user as Owner | A personal workspace for each user, plus team workspaces |
@@ -87,12 +87,12 @@ Phases run in order. If you want an early private deploy, Phase 5 can come right
 
 ### Phase 0: hygiene, safety fixes, scan facts
 
-Everything in this phase also protects today's VM.
+Everything in this phase also protects local installs.
 
 **0.1 Repo hygiene**
 - Add a `.gitignore` covering `.env`, `.venv/`, `node_modules/`, `frontend/dist/`, `backend/data/`, `backend/uploads/`, `backend/cache/`, `*.egg-info/`, `__pycache__/` and `.DS_Store`.
 - Run `git rm --cached` on the committed runtime data: `backend/data/`, `backend/uploads/`, `backend/cache/`, `backend/eol_tracker_backend.egg-info/` and the `.DS_Store` files. The files stay on disk, and history is not rewritten.
-- **Caution for the VM:** if the VM's copy is a git clone, back up `backend/uploads/` and `backend/data/` before you pull this change. Git deletes files from other clones when a commit stops tracking them.
+- **Caution for other clones:** back up `backend/uploads/` and `backend/data/` before pulling this change into an existing clone, because git deletes files from other clones when a commit stops tracking them. (The internal VM isn't a clone, so this didn't apply there.)
 - Add the `.env.example` that the README refers to. It should list every variable, today's and this plan's, with each new one commented out until its phase lands.
 
 **0.2 Safe cloning** ([clone.py:81-85](../backend/app/agents/clone.py#L81-L85), [models.py:295](../backend/app/models.py#L295))
@@ -101,7 +101,7 @@ Everything in this phase also protects today's VM.
   - `https://` only, with no username or password in the URL;
   - the host must be on `GIT_HOST_ALLOWLIST`;
   - no IP addresses, and no host that resolves to a private, loopback, link-local or CGNAT address.
-  - Allowlisted hosts may be private only in `AUTH_MODE=none`, so your internal GitLab keeps working on the VM.
+  - Allowlisted hosts may be private only in `AUTH_MODE=none`, so internal git servers keep working in local installs.
 - **Check branch names:** reject a leading `-` and anything git's ref-name rules forbid.
 - **Run git safely:**
   - command: `git clone --depth 1 --single-branch --branch <b> -- <url> <dest>`;
@@ -131,7 +131,7 @@ Everything in this phase also protects today's VM.
 - **The problem today:** a scan's facts are spread across in-memory status ([pipeline.py:55](../backend/app/pipeline.py#L55)), the snapshot row and the scan-log JSON, and failed scans never become snapshots. The analytics page (Phase 6) needs one row per scan.
 - **New table**, written at the end of every scan (in the pipeline's `finally`). Each row holds:
   - repo, workspace (empty until 2a), branch and snapshot timestamp;
-  - trigger: `scheduled`, `catch-up`, `manual`, `initial` or `upload`;
+  - trigger: `scheduled`, `manual`, `initial` or `upload` (the column is `triggered_by`);
   - queued, started and finished times, the outcome, and seconds per stage;
   - which stages had issues, and the first error (redacted and truncated);
   - package counts by ecosystem, and flag counts;
@@ -144,7 +144,7 @@ Everything in this phase also protects today's VM.
 - Frontend: `npm ci`, `npm test` and `npm run build` all passing.
 - Update the developer guide, including notes for Windows.
 
-**Done when:** all existing and new tests pass, and a scan on the VM gives the same results as before.
+**Done when:** all existing and new tests pass, and real scans of public repos on the dev machine give the expected results. (Done 2026-11-07: 290 tests, plus scans of psf/requests and docker/welcome-to-docker.)
 
 ---
 
@@ -204,7 +204,7 @@ Everything in this phase also protects today's VM.
 **Tests** (fake clients, no network): usage mapping, the `pause_turn` loop, refusals, error mapping, the tool loop, the citation check, dispatcher routing, and pricing.
 
 **Done when:**
-- a scan on the VM with `AI_PROVIDER=anthropic` reproduces the M2 `cybox` result;
+- a live run reproduces the M2 `cybox` result. Done 2026-11-07 through the Claude CLI ("eol, successor stix2", with 3 web citations); the Anthropic API run is waiting for a key;
 - a scan with a free Gemini or Groq key plus Tavily runs from start to finish;
 - the eval results are recorded.
 
@@ -227,7 +227,7 @@ Everything in this phase also protects today's VM.
 - In `AUTH_MODE=none`, the migration creates a built-in `local` workspace and user, which own all existing repos.
 
 **2a.3 Sign-in**
-- GitHub OAuth through Authlib. The flow: login, then the callback, then create or update the user. On first login the user also gets a personal workspace. Then a session starts.
+- GitHub OAuth, written directly on `httpx`: the flow is short, and that keeps a dependency out and makes it easy to test. The flow: login, then the callback, then create or update the user. On first login the user also gets a personal workspace. Then a session starts.
 - The session cookie is `__Host-session`: HttpOnly, Secure, SameSite=Lax. (SameSite=Strict would drop the cookie on the redirect back from GitHub.)
 - Requests that change data must send a custom header and a matching `Origin`.
 - Once there are `MAX_USERS` accounts, new people see a "sign-ups are full" page. Existing users aren't affected, and disabled users can't sign in.
@@ -250,7 +250,7 @@ Everything in this phase also protects today's VM.
 - GitHub lookups during a scan ([source_apis.py:341](../backend/app/agents/source_apis.py#L341)) use the first token available, in this order:
   1. the workspace's GitHub token;
   2. the sign-in token of whoever added the repo;
-  3. `GITHUB_API_TOKEN` (on the VM);
+  3. `GITHUB_API_TOKEN` (local installs);
   4. no token.
 
   The token travels with the scan in a per-scan context variable, the same way the scan log does today.
@@ -464,10 +464,10 @@ Everything in this phase also protects today's VM.
 | `GIT_HOST_ALLOWLIST` | `github.com,gitlab.com,bitbucket.org,codeberg.org` | 0 | Hosts that repos may be cloned from |
 | `CLONE_TIMEOUT_SECONDS` | `120` | 0 | Stops a hung clone |
 | `IMAGE_INSPECT` | `auto` | 0 | Docker image inventory (always off in `AUTH_MODE=github`) |
-| `AI_PROVIDER`, `AI_MODEL`, `AI_API_KEY`, `AI_BASE_URL` | unset | 1 | AI provider settings from env (for the VM; per workspace from 2a) |
+| `AI_PROVIDER`, `AI_MODEL`, `AI_API_KEY`, `AI_BASE_URL` | unset | 1 | AI provider settings from env (local installs; per workspace from 2a) |
 | `SEARCH_PROVIDER`, `SEARCH_API_KEY` | unset | 1 | The search service for OpenAI-compatible providers |
 | `AI_MAX_TOOL_ROUNDS` | `8` | 1 | The most tool rounds in one AI conversation |
-| `AUTH_MODE` | `none` | 2a | `none` (VM) or `github` (cloud) |
+| `AUTH_MODE` | `none` | 2a | `none` (local / self-hosted) or `github` (cloud) |
 | `APP_SECRET_KEY`, `APP_SECRET_KEY_PREVIOUS` | required in `github` mode | 2a | Sessions and secret encryption, with key rotation |
 | `PUBLIC_BASE_URL` | — | 2a | The OAuth callback and links |
 | `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET` | — | 2a | Sign in with GitHub |
@@ -480,7 +480,7 @@ Everything in this phase also protects today's VM.
 ## Rules for every phase
 - **Secrets** never appear in logs, scan logs, API responses or the audit log. A redactor checks every error message that leaves the server.
 - **One address checker** is shared by cloning, `fetch_url`, and any future request to a URL a user supplied.
-- **Every phase ships with tests and updated docs** (README, DEVELOPER-GUIDE, USER-GUIDE). Today's VM behaviour stays covered by the existing tests running in `AUTH_MODE=none`.
+- **Every phase ships with tests and updated docs** (README, DEVELOPER-GUIDE, USER-GUIDE). Local-mode behaviour stays covered by the existing tests running in `AUTH_MODE=none`.
 - **Database migrations** continue Alembic's numbering from `0006` and run at startup, as today.
 
 ## Risks

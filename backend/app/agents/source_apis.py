@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 import httpx
 from packaging.version import InvalidVersion, Version
 
+from .. import scan_context
 from ..config import get_settings
 
 _EOL_BASE = "https://endoflife.date/api/v1"
@@ -373,7 +374,9 @@ def moved_to(description: str | None) -> str | None:
 async def query_github_repo(client: httpx.AsyncClient, owner_repo: str) -> dict:
     slug = github_slug(owner_repo) or owner_repo.strip("/")
     headers = {"Accept": "application/vnd.github+json"}
-    token = get_settings().github_read_token()
+    # the scan's workspace token, else the repo creator's sign-in token, else
+    # (local mode) the env: see scan_context
+    token = scan_context.github_api_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     data = await _get_json(client, f"https://api.github.com/repos/{slug}", headers=headers)

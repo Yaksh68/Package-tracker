@@ -1,9 +1,12 @@
 """Which AI provider a scan uses, and with what credentials.
 
-Phase 1 reads it from the environment (AI_PROVIDER, AI_MODEL, AI_API_KEY,
-AI_BASE_URL, SEARCH_PROVIDER, SEARCH_API_KEY); Phase 2a moves it to each
-workspace's settings and encrypted secrets, with the env as the local-mode
-fallback.
+Each workspace chooses its own provider: the provider, model, base URL and
+search provider are workspace settings (settings_store), and the AI and
+search keys are encrypted workspace secrets (accounts). Inside a scan, the
+scan's workspace applies (scan_context); outside one, the local workspace.
+The env (AI_PROVIDER, AI_MODEL, AI_API_KEY, AI_BASE_URL, SEARCH_PROVIDER,
+SEARCH_API_KEY) only supplies defaults for the local workspace in the local
+mode. The public mode never uses the server's own keys.
 
     AI_PROVIDER unset   → the Claude CLI and its login (local mode only; it's
                           what the app did before providers existed)
@@ -56,11 +59,24 @@ class AiConfig:
         return self.provider
 
 
-def resolve(settings: Settings | None = None) -> tuple[AiConfig | None, str | None]:
+def resolve(settings: Settings | None = None, *,
+            workspace_id: str | None = None) -> tuple[AiConfig | None, str | None]:
+    from .. import accounts, scan_context, settings_store  # (they import this module)
+    from ..models import LOCAL_WORKSPACE_ID
+
     s = settings or get_settings()
-    provider = (s.ai_provider or "").strip().lower()
-    model = (s.ai_model or "").strip()
-    key = (s.ai_api_key or "").strip() or None
+    ws = workspace_id or scan_context.workspace_id() or LOCAL_WORKSPACE_ID
+    rt = settings_store.get_runtime_settings(ws)
+    # the server's own keys back only the local workspace in the local mode
+    env_ok = ws == LOCAL_WORKSPACE_ID and not s.public_mode()
+
+    def secret(name: str, env_value: str | None) -> str | None:
+        value = accounts.get_secret(ws, name) or (env_value if env_ok else None)
+        return (value or "").strip() or None
+
+    provider = (rt.get("ai_provider") or "").strip().lower()
+    model = (rt.get("ai_model") or "").strip()
+    key = secret("ai_api_key", s.ai_api_key)
 
     if provider in ("", "claude-cli"):
         if s.public_mode():
@@ -69,22 +85,23 @@ def resolve(settings: Settings | None = None) -> tuple[AiConfig | None, str | No
         return AiConfig(provider="claude-cli", model=model or s.agent_model), None
 
     if provider == "anthropic":
-        key = key or (os.environ.get("ANTHROPIC_API_KEY") or "").strip() or None
+        if not key and env_ok:
+            key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip() or None
         if not key:
-            return None, "add an Anthropic API key (AI_API_KEY)"
+            return None, "add an Anthropic API key"
         return AiConfig(provider="anthropic", model=model or DEFAULT_CLAUDE_MODEL, api_key=key), None
 
     if provider in PRESET_BASE_URLS or provider == "openai-compatible":
         preset = provider if provider in PRESET_BASE_URLS else None
-        base_url = PRESET_BASE_URLS.get(provider) or (s.ai_base_url or "").strip()
+        base_url = PRESET_BASE_URLS.get(provider) or (rt.get("ai_base_url") or "").strip()
         if not base_url:
-            return None, "set AI_BASE_URL for an openai-compatible provider"
+            return None, "set the base URL for an openai-compatible provider"
         if preset and not key:
-            return None, f"add a {provider} API key (AI_API_KEY)"
+            return None, f"add a {provider} API key"
         if not model:
-            return None, "set AI_MODEL: free model names change too often for a default"
-        search = (s.search_provider or "").strip().lower()
-        search_key = (s.search_api_key or "").strip() or None
+            return None, "choose a model: free model names change too often for a default"
+        search = (rt.get("search_provider") or "").strip().lower()
+        search_key = secret("search_api_key", s.search_api_key)
         if search not in SEARCH_PROVIDERS or not search_key:
             return None, ("this provider has no built-in web search: set SEARCH_PROVIDER "
                           "(tavily or exa) and SEARCH_API_KEY")

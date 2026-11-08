@@ -234,10 +234,60 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   drops one branch's trace, or every branch's when `branch` is omitted (repo
   deletion); free function `emit(...)`.
 
-### `settings_store.py` (runtime, UI-editable settings)
-- `get_runtime_settings()` — env defaults overlaid with the `app_settings` table.
-- `update_runtime_settings(patch)` — persists an allowlisted subset
-  (`use_enrichment_agent`, `use_extraction_agent`).
+### `settings_store.py` (runtime, UI-editable settings, per workspace)
+- `get_runtime_settings(workspace_id=None)` returns the workspace's defaults
+  overlaid with its `workspace_settings` rows. Without an argument it uses the
+  current scan's workspace, or the local workspace outside a scan.
+  - Defaults: the local workspace in the local mode takes them from the env.
+  - Any other workspace starts with AI research off and no provider.
+- `update_runtime_settings(patch, workspace_id=None)` persists an allowlisted
+  set: `use_enrichment_agent`, `use_extraction_agent`, `ai_provider`, `ai_model`,
+  `ai_base_url`, `search_provider`. It raises `ValueError` for a bad value (the
+  route returns 422). Keys and tokens aren't settings: see `accounts.set_secret`.
+
+### `accounts.py`, `auth.py`, `crypto.py`, `scan_context.py` (Phase 2a)
+- **Modes.** `AUTH_MODE=none` runs every request as the built-in `local` user in
+  the `local` workspace (migration 0008 creates both; `ensure_local_rows()`
+  re-creates them on demand). `AUTH_MODE=github` is the public mode.
+- **`auth.py`**
+  - Sign in with GitHub, written directly on httpx:
+    - `/api/auth/github/login` redirects with a random `state`, also kept in
+      an HttpOnly cookie;
+    - `/api/auth/github/callback` checks the state, swaps the code for a
+      token, reads `/user`, applies the `MAX_USERS` cap (platform admins are
+      exempt) and refuses disabled accounts;
+    - then `accounts.sign_in_github_user` (a personal workspace on first
+      sign-in, the OAuth token stored encrypted) and a session cookie.
+  - `get_principal` is the dependency every route uses: user plus active
+    workspace (the `X-Workspace` header, defaulting to the personal one; a
+    workspace you're not in is a 404).
+  - `CsrfMiddleware`: in the public mode, data-changing `/api` calls need
+    `X-Requested-With: packages-tracker`, and an Origin matching
+    `PUBLIC_BASE_URL` when one is sent.
+- **`accounts.py`** holds:
+  - users, and sessions (only a SHA-256 of each token is stored);
+  - workspaces and memberships;
+  - per-workspace settings, and secrets (encrypted; `secret_hints` is all the
+    API ever returns about them);
+  - `touch_activity` (one `user_activity_days` row per user per day) and
+    `record_event` (`usage_events`). Neither can break a request.
+  - `delete_workspace` and `delete_user`, used by `DELETE /api/me`.
+- **`crypto.py`** stores values as `enc:v1:` Fernet tokens.
+  - The key is derived with HKDF from `APP_SECRET_KEY`, and rotates through
+    `APP_SECRET_KEY_PREVIOUS`. The public mode won't start without it; a local
+    install generates `data/secret.key`.
+  - Legacy plain-text values still decrypt, and per-repo tokens are
+    re-encrypted at startup (`storage.encrypt_plaintext_tokens`).
+- **`scan_context.py`**: the pipeline binds a `ScanContext` (the repo's
+  workspace and creator) for every scan. Everything inside a scan gets its
+  credentials from there:
+  - the AI provider (`ai.config.resolve`), from the workspace's settings and
+    secrets;
+  - clone tokens, from the workspace secret, else the env (local mode only);
+  - the GitHub API token, from the workspace secret, else the repo creator's
+    sign-in token, else the env (local mode only).
+
+  The public mode never uses the server's own tokens.
 
 ### `pipeline.py` (scan orchestration)
 - In-memory state: `_status` (`ScanStatus` keyed by `(repo_id, branch)` tuple),
@@ -286,9 +336,20 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
 - `app` — FastAPI + CORS (Vite origins) + router; `GET /api/health`.
 
 ### `api/routes.py` (REST — reads/writes via `storage.py`)
-- Helpers: `_mask` (hide token override), `_require_repo` (404),
-  `_require_branch(repo, branch)` (404 if the repo doesn't track that branch).
-- Settings: `GET/PUT /api/settings`.
+- Every route takes `me: Principal = Depends(get_principal)`. Repos are scoped to
+  the caller's workspaces, and in the public mode new repos get random IDs
+  (`storage.new_repo_id`).
+- Helpers:
+  - `_mask` (hides the token override);
+  - `_require_repo(repo_id, me)`: 404 if the repo is missing *or* in a
+    workspace the caller isn't in;
+  - `_require_branch(repo, branch)`: 404 if the repo doesn't track that
+    branch;
+  - `_forget_repo` (the repo's data, schedule, uploads and in-memory state);
+  - `_event` (a usage event).
+- Settings and secrets: `GET/PUT /api/settings` (per workspace, including
+  secret hints) and `PUT/DELETE /api/secrets/{name}` (write-only).
+- Account: `GET /api/me`, and `DELETE /api/me` (public mode).
 - Repos: `list_repos` (adds `branches_info: list[{branch, latest_snapshot,
   flag_counts, scan_state, last_scan}]`, one entry per branch), `create_repo`
   (derives id, schedules every branch, triggers a first scan **per branch**),

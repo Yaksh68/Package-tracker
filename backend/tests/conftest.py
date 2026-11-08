@@ -16,12 +16,16 @@ def _isolated_db(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", url)
     monkeypatch.setenv("UPLOAD_DIR", f"{tmp}/uploads")
     monkeypatch.setenv("APT_INDEX_CACHE_DIR", f"{tmp}/apt-index")
+    # encryption at rest needs a key; never let a test generate data/secret.key
+    monkeypatch.setenv("APP_SECRET_KEY", "test-secret-key-for-the-test-suite")
+    monkeypatch.setenv("LOCAL_SECRET_KEY_FILE", f"{tmp}/secret.key")
 
-    from app import db
+    from app import crypto, db
     from app.config import get_settings
     from app.db_models import Base
 
     get_settings.cache_clear()
+    crypto.reset()
     db.reset_engine()
     engine = db.get_engine()
     if url.startswith("sqlite"):
@@ -34,3 +38,4 @@ def _isolated_db(monkeypatch):
     yield tmp
     db.reset_engine()
     get_settings.cache_clear()
+    crypto.reset()

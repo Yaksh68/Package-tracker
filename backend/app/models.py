@@ -10,6 +10,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .git_rules import check_branch, check_repo_url
 
+# The built-in user and workspace the local mode (AUTH_MODE=none) runs as.
+# Migration 0008 creates them and moves pre-workspace repos into the workspace.
+LOCAL_USER_ID = "local"
+LOCAL_WORKSPACE_ID = "local"
+
 
 # --------------------------------------------------------------------------- #
 # Extraction (Agent 1 output contract)                                        #
@@ -220,6 +225,11 @@ def clean_branches(value) -> list[str]:
 
 class Repo(BaseModel):
     id: str
+    # The owning workspace (server-maintained). Defaults to the built-in local
+    # workspace, which is also where repos from before workspaces existed live.
+    workspace_id: str = LOCAL_WORKSPACE_ID
+    name: str | None = None        # display name
+    created_by: str | None = None  # user id; its GitHub token backs the repo's GitHub lookups
     # "git": clone `url` per branch. "upload": scan the zip uploaded per
     # version (`branches` hold version labels; `url` is `upload://<file name>`).
     source: Literal["git", "upload"] = "git"
@@ -446,6 +456,28 @@ class ScanLog(BaseModel):
     snapshot_ts: str | None = None
     state: ScanState = ScanState.idle
     entries: list[LogEntry] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Accounts and workspaces                                                      #
+# --------------------------------------------------------------------------- #
+class User(BaseModel):
+    id: str
+    github_id: int | None = None
+    login: str
+    name: str | None = None
+    avatar_url: str | None = None
+    platform_role: Literal["user", "admin"] = "user"
+    status: Literal["active", "disabled"] = "active"
+    created_at: datetime | None = None
+    last_seen_at: datetime | None = None
+
+
+class Workspace(BaseModel):
+    id: str
+    name: str
+    personal: bool = False
+    role: str | None = None  # the current user's role in it, when listed for a user
 
 
 class ScanRunRecord(BaseModel):

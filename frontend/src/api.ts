@@ -53,10 +53,18 @@ export async function parseError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, msg, detail);
 }
 
+/** Sent on every request. In the public mode the backend refuses data-changing
+ *  requests without it: another site can't add a custom header without a CORS
+ *  preflight, so this proves the request came from our own UI (CSRF). */
+export const CSRF_HEADERS = { "X-Requested-With": "packages-tracker" } as const;
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...init });
+    res = await fetch(url, {
+      ...init,
+      headers: { "Content-Type": "application/json", ...CSRF_HEADERS, ...(init?.headers ?? {}) },
+    });
   } catch {
     throw new ApiError(0, "Backend unreachable — is packages-tracker-backend running?");
   }
@@ -69,7 +77,8 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 async function postForm<T>(url: string, form: FormData): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(url, { method: "POST", body: form });
+    // no Content-Type: the browser sets the multipart boundary itself
+    res = await fetch(url, { method: "POST", body: form, headers: { ...CSRF_HEADERS } });
   } catch {
     throw new ApiError(0, "Backend unreachable — is packages-tracker-backend running?");
   }

@@ -36,12 +36,35 @@ def test_local_mode_defaults_to_the_claude_cli(monkeypatch):
     assert why is None and cfg.provider == "claude-cli" and cfg.model == get_settings().agent_model
 
 
-def test_the_public_mode_never_uses_the_cli(monkeypatch):
+def test_the_public_mode_never_uses_the_cli_or_the_servers_env(monkeypatch):
     _env(monkeypatch, AUTH_MODE="github")
     assert ai_config.resolve() == (None, "no AI provider is configured")
-    _env(monkeypatch, AUTH_MODE="github", AI_PROVIDER="claude-cli")
+    # the server's env is ignored in the public mode: users bring their own keys
+    _env(monkeypatch, AUTH_MODE="github", AI_PROVIDER="anthropic", AI_API_KEY="sk-ant-server")
+    assert ai_config.resolve() == (None, "no AI provider is configured")
+    # a workspace that stored "claude-cli" before the switch still can't use it
+    from app import accounts
+    from app.models import LOCAL_WORKSPACE_ID
+    accounts.set_workspace_settings(LOCAL_WORKSPACE_ID, {"ai_provider": "claude-cli"})
     cfg, why = ai_config.resolve()
     assert cfg is None and "public mode" in why
+
+
+def test_a_workspace_uses_its_own_settings_and_encrypted_keys(monkeypatch):
+    _env(monkeypatch, AUTH_MODE="github")
+    from app import accounts
+    from app.db import session
+    from app.db_models import SecretRow, WorkspaceRow
+    import datetime as dt
+    with session() as s:
+        s.add(WorkspaceRow(id="ws1", name="team", personal=False, created_at=dt.datetime.now(dt.timezone.utc)))
+    accounts.set_workspace_settings("ws1", {"ai_provider": "anthropic", "ai_model": "claude-sonnet-5-5"})
+    accounts.set_secret("ws1", "ai_api_key", "sk-ant-workspace-key-123")
+    cfg, why = ai_config.resolve(workspace_id="ws1")
+    assert why is None and (cfg.provider, cfg.model, cfg.api_key) == (
+        "anthropic", "claude-sonnet-5-5", "sk-ant-workspace-key-123")
+    with session() as s:  # stored encrypted, never in plain text
+        assert s.get(SecretRow, ("ws1", "ai_api_key")).ciphertext.startswith("enc:v1:")
 
 
 def test_anthropic_needs_a_key_and_defaults_to_haiku_5_5(monkeypatch):
@@ -55,7 +78,7 @@ def test_anthropic_needs_a_key_and_defaults_to_haiku_5_5(monkeypatch):
 
 def test_openai_compatible_presets_need_a_model_and_a_search_key(monkeypatch):
     _env(monkeypatch, AI_PROVIDER="groq", AI_API_KEY="gsk_x")
-    assert "AI_MODEL" in ai_config.resolve()[1]
+    assert "choose a model" in ai_config.resolve()[1]
     _env(monkeypatch, AI_PROVIDER="groq", AI_API_KEY="gsk_x", AI_MODEL="openai/gpt-oss-120b")
     assert "SEARCH_PROVIDER" in ai_config.resolve()[1]
     _env(monkeypatch, AI_PROVIDER="groq", AI_API_KEY="gsk_x", AI_MODEL="openai/gpt-oss-120b",
@@ -68,7 +91,7 @@ def test_openai_compatible_presets_need_a_model_and_a_search_key(monkeypatch):
 
 def test_a_custom_endpoint_needs_a_base_url_but_not_a_key(monkeypatch):
     _env(monkeypatch, AI_PROVIDER="openai-compatible", AI_MODEL="llama3")
-    assert "AI_BASE_URL" in ai_config.resolve()[1]
+    assert "base URL" in ai_config.resolve()[1]
     _env(monkeypatch, AI_PROVIDER="openai-compatible", AI_MODEL="llama3",
          AI_BASE_URL="http://localhost:11434/v1", SEARCH_PROVIDER="exa", SEARCH_API_KEY="k")
     cfg, why = ai_config.resolve()
