@@ -9,6 +9,7 @@ ambiguous cases only.
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import re
 from datetime import date, datetime
@@ -105,9 +106,26 @@ async def _get_json(client: httpx.AsyncClient, url: str, **kw) -> Any | None:
     return {"__status__": r.status_code}
 
 
+_products_gate: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
+
+
+def _products_lock() -> asyncio.Lock:
+    """One fetch of the products index at a time (lookups run concurrently).
+    A lock belongs to its event loop, so each loop gets its own."""
+    global _products_gate
+    loop = asyncio.get_running_loop()
+    if _products_gate is None or _products_gate[0] is not loop:
+        _products_gate = (loop, asyncio.Lock())
+    return _products_gate[1]
+
+
 async def endoflife_products(client: httpx.AsyncClient) -> list[dict]:
     global _products_index_cache
-    if _products_index_cache is None:
+    if _products_index_cache is not None:
+        return _products_index_cache
+    async with _products_lock():  # the lookups in flight wait for one fetch
+        if _products_index_cache is not None:
+            return _products_index_cache
         data = await _get_json(client, f"{_EOL_BASE}/products")
         result = (data or {}).get("result") if isinstance(data, dict) else None
         # A failed fetch is NOT cached. Storing `[]` would make every later

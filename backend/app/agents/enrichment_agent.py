@@ -14,6 +14,7 @@ is still only fetched once.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -432,20 +433,27 @@ async def enrich(
     results: dict[str, Enrichment] = {}
     if by_key:
         async with source_apis.make_client() as client:
-            for pkg in by_key.values():
-                try:
-                    e = await _enrich_one(
-                        client, pkg, today=today,
-                        distro=distro_by_source.get(pkg.source_file),
-                        index=(apt_indexes or {}).get(pkg.source_file),
-                    )
-                except Exception as ex:  # noqa: BLE001 - degrade, never fail scan
-                    e = Enrichment(
-                        name=pkg.name, version=pkg.version, ecosystem=pkg.ecosystem,
-                        verdict=Verdict.unknown, confidence=Confidence.low,
-                        summary=f"enrichment error: {ex}",
-                    )
-                results[pkg.key] = e
+            # A few lookups at a time (LOOKUP_CONCURRENCY): one after another,
+            # a 1,200-package lockfile took about 20 minutes.
+            gate = asyncio.Semaphore(max(1, get_settings().lookup_concurrency))
+
+            async def look_up(pkg: Package) -> Enrichment:
+                async with gate:
+                    try:
+                        return await _enrich_one(
+                            client, pkg, today=today,
+                            distro=distro_by_source.get(pkg.source_file),
+                            index=(apt_indexes or {}).get(pkg.source_file),
+                        )
+                    except Exception as ex:  # noqa: BLE001 - degrade, never fail scan
+                        return Enrichment(
+                            name=pkg.name, version=pkg.version, ecosystem=pkg.ecosystem,
+                            verdict=Verdict.unknown, confidence=Confidence.low,
+                            summary=f"enrichment error: {ex}",
+                        )
+
+            found = await asyncio.gather(*(look_up(p) for p in by_key.values()))
+            results = {p.key: e for p, e in zip(by_key.values(), found)}
 
     # --- AI research second pass ---------------------------------------------
     # Ambiguous packages only (see `_needs_ai`). With no cache, this runs on

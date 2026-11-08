@@ -291,3 +291,30 @@ async def test_ai_pass_records_token_totals(monkeypatch):
     assert totals[0]["cache_read_input_tokens"] == 2 * one["cache_read_input_tokens"]
     assert totals[0]["web_search_requests"] == 2 * one["web_search_requests"]
     assert totals[0]["cost_usd"] == round(2 * one["cost_usd"], 6)
+
+
+async def test_lookups_run_a_few_at_a_time_and_keep_their_order(monkeypatch):
+    """One package at a time, a 1,200-package lockfile took ~20 minutes."""
+    import asyncio
+
+    from app.config import get_settings
+
+    monkeypatch.setenv("LOOKUP_CONCURRENCY", "3")
+    get_settings.cache_clear()
+    settings_store.update_runtime_settings({"use_enrichment_agent": False})
+    running, peak = 0, 0
+
+    async def slow_lookup(client, pkg, *, today, distro=None, index=None):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return _e(name=pkg.name, version=pkg.version, ecosystem=pkg.ecosystem, verdict=Verdict.supported)
+
+    monkeypatch.setattr(ea, "_enrich_one", slow_lookup)
+    pkgs = [Package(name=f"p{i}", version="1.0", ecosystem=Ecosystem.pypi, source_file="requirements.txt")
+            for i in range(10)]
+    out = await ea.enrich(pkgs, today=dt.date(2026, 11, 8))
+    assert peak == 3
+    assert [e.name for e in out] == [f"p{i}" for i in range(10)]
