@@ -29,6 +29,7 @@ const ACTIONS: Record<string, string> = {
   "invite.accept": "Accepted an invite",
   "invite.decline": "Declined an invite",
   "admin.view_workspace": "Viewed this workspace (platform admin)",
+  "admin.limits": "Changed this workspace's limits (platform admin)",
 };
 
 const SECRET_LABEL: Record<string, string> = {

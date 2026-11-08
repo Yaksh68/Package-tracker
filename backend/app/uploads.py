@@ -22,7 +22,7 @@ import stat
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 from .agents.clone import Clone, CloneError
 from .agents.parsers import under_skipped
@@ -50,6 +50,17 @@ def has_upload(repo_id: str, version: str) -> bool:
     return _file(repo_id, version).is_file()
 
 
+def stored_bytes(repo_id: str) -> int:
+    """What the repo's kept zips take on disk."""
+    d = _dir(repo_id)
+    return sum(f.stat().st_size for f in d.glob("*.zip")) if d.is_dir() else 0
+
+
+def version_bytes(repo_id: str, version: str) -> int:
+    f = _file(repo_id, version)
+    return f.stat().st_size if f.is_file() else 0
+
+
 def _safe_parts(name: str) -> tuple[str, ...] | None:
     """Path parts of a zip entry, or None if it would escape the target dir."""
     p = PurePosixPath(name.replace("\\", "/"))
@@ -67,8 +78,9 @@ def _kept(info: zipfile.ZipInfo) -> bool:
     return bool(parts) and not info.is_dir() and not _is_symlink(info) and not under_skipped(parts)
 
 
-def _check(zf: zipfile.ZipFile) -> None:
+def _check(zf: zipfile.ZipFile, max_unpacked_mb: int | None = None) -> None:
     s = get_settings()
+    unpacked_mb = min(s.upload_max_unpacked_mb, max_unpacked_mb or s.upload_max_unpacked_mb)
     infos = zf.infolist()
     if any(_safe_parts(i.filename) is None for i in infos):
         raise UploadError("the zip contains paths that point outside the archive (../ or absolute)")
@@ -78,15 +90,21 @@ def _check(zf: zipfile.ZipFile) -> None:
     if len(kept) > s.upload_max_files:
         raise UploadError(f"the zip has {len(kept)} files; the limit is {s.upload_max_files}")
     total = sum(i.file_size for i in kept)
-    if total > s.upload_max_unpacked_mb * _CHUNK:
+    if total > unpacked_mb * _CHUNK:
         raise UploadError(f"the zip unpacks to {total // _CHUNK} MB; the limit is "
-                          f"{s.upload_max_unpacked_mb} MB (node_modules, .git etc. are not counted)")
+                          f"{unpacked_mb} MB (node_modules, .git etc. are not counted)")
 
 
-def save(repo_id: str, version: str, src: BinaryIO) -> int:
+def save(repo_id: str, version: str, src: BinaryIO, *, max_mb: int | None = None,
+         max_unpacked_mb: int | None = None,
+         before_replace: Callable[[int], None] | None = None) -> int:
     """Validate and store the archive for `version`, replacing any earlier one.
-    Returns its size in bytes."""
-    limit = get_settings().upload_max_mb * _CHUNK
+    Returns its size in bytes. `max_mb` / `max_unpacked_mb` lower the env's
+    caps (the workspace's limits). `before_replace(size)` may raise to refuse
+    a valid zip (e.g. the workspace's storage limit); the earlier zip is
+    then left as it was."""
+    s = get_settings()
+    limit = min(s.upload_max_mb, max_mb or s.upload_max_mb) * _CHUNK
     _dir(repo_id).mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=_dir(repo_id), suffix=".part")
     try:
@@ -101,9 +119,11 @@ def save(repo_id: str, version: str, src: BinaryIO) -> int:
             raise UploadError("the file is not a .zip archive")
         try:
             with zipfile.ZipFile(tmp) as zf:
-                _check(zf)
+                _check(zf, max_unpacked_mb)
         except zipfile.BadZipFile as e:
             raise UploadError(f"the zip is damaged: {e}") from e
+        if before_replace is not None:
+            before_replace(size)
         os.replace(tmp, _file(repo_id, version))
         return size
     finally:
@@ -111,18 +131,20 @@ def save(repo_id: str, version: str, src: BinaryIO) -> int:
             os.unlink(tmp)
 
 
-def unpack(repo_id: str, version: str) -> Clone:
+def unpack(repo_id: str, version: str, *, max_unpacked_mb: int | None = None) -> Clone:
     """Unpack the stored archive into a temp dir (caller cleans up), returning
-    it as a `Clone`. A zip of a single folder is rooted at that folder."""
+    it as a `Clone`. A zip of a single folder is rooted at that folder.
+    `max_unpacked_mb` lowers the env's cap (the workspace's limit)."""
     path = _file(repo_id, version)
     if not path.is_file():
         raise CloneError(f"no zip uploaded for version '{version}' — upload one to scan it")
     tmp = tempfile.mkdtemp(prefix="packages-tracker-upload-")
     dest = Path(tmp) / "repo"
-    budget = get_settings().upload_max_unpacked_mb * _CHUNK
+    s = get_settings()
+    budget = min(s.upload_max_unpacked_mb, max_unpacked_mb or s.upload_max_unpacked_mb) * _CHUNK
     try:
         with zipfile.ZipFile(path) as zf:
-            _check(zf)
+            _check(zf, max_unpacked_mb)
             for info in zf.infolist():
                 if not _kept(info):
                     continue

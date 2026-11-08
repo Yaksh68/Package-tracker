@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from .. import accounts, audit, rbac, scan_queue, scanlog, scheduler, settings_store, storage, uploads
+from .. import accounts, audit, limits, rbac, scan_queue, scanlog, scheduler, settings_store, storage, uploads
 from .. import flags as flags_mod
 from ..ai import probe
 from ..ai.errors import AiError, redact_keys
@@ -117,6 +117,16 @@ def update_settings_route(patch: dict, me: Principal = Depends(get_principal)) -
     if "use_enrichment_agent" in patch:
         _event(me, "ai_toggle", on=bool(out["use_enrichment_agent"]))
     return {**out, "secrets": _secrets_view(me)}
+
+
+@router.get("/limits")
+def workspace_limits(me: Principal = Depends(get_principal)) -> dict:
+    """The active workspace's limits and what it uses now. The local mode has
+    no limits."""
+    if not limits.enabled():
+        return {"enabled": False}
+    return {"enabled": True, "limits": limits.effective(me.workspace_id),
+            "usage": limits.usage(me.workspace_id), "labels": limits.LABELS}
 
 
 class AiTestBody(BaseModel):
@@ -245,6 +255,7 @@ async def create_repo(body: RepoCreate, me: Principal = Depends(get_principal)) 
                else _new_repo_id(body.url))
     if storage.get_repo(repo_id):
         raise HTTPException(409, f"repo '{repo_id}' already exists")
+    _check_new_repo(me, branches=len(body.branches), interval_days=body.interval_days)
     repo = Repo(
         id=repo_id,
         workspace_id=me.workspace_id,
@@ -287,6 +298,12 @@ def update_repo(repo_id: str, body: RepoUpdate, me: Principal = Depends(get_prin
             updates["branches"] = [check_branch(b) for b in updates["branches"]]
         except RepoUrlError as e:
             raise HTTPException(422, str(e)) from e
+    if "branches" in updates:
+        limits.check_max("branches_per_repo", len(updates["branches"] or []),
+                         workspace_id=repo.workspace_id, user_id=me.user.id)
+    if "interval_days" in updates:
+        limits.check_min("min_interval_days", updates["interval_days"],
+                         workspace_id=repo.workspace_id, user_id=me.user.id)
     ignored_changed = ("ignored_packages" in updates
                        and updates["ignored_packages"] != repo.ignored_packages)
     reflag = "release_date" in updates or ignored_changed
@@ -357,6 +374,8 @@ async def scan_now(repo_id: str, branch: str = Query(...),
         # merged into the scan that's already queued or running: nothing new happens
         return {"status": "running" if is_scanning(repo_id, branch) else "queued", "merged": True,
                 "repo_id": repo_id, "branch": branch, "queue_position": scan_queue.position(repo_id, branch)}
+    limits.check_count("manual_scans_per_hour", used=limits.manual_scans_last_hour(repo.workspace_id),
+                       workspace_id=repo.workspace_id, user_id=me.user.id, status=429)
     scheduler.trigger_now(repo, branch, trigger="manual")
     _audit(me, "scan.manual", workspace_id=repo.workspace_id, target_type="repo",
            target_id=repo.id, branch=branch)
@@ -368,13 +387,36 @@ async def scan_now(repo_id: str, branch: str = Query(...),
 # --------------------------------------------------------------------------- #
 # uploaded zips (source="upload" repos)                                         #
 # --------------------------------------------------------------------------- #
-async def _store_zip(repo_id: str, version: str, file: UploadFile) -> None:
+async def _store_zip(repo_id: str, version: str, file: UploadFile, me: Principal,
+                     workspace_id: str) -> None:
     if not (file.filename or "").lower().endswith(".zip"):
         raise HTTPException(400, "upload a .zip file")
+
+    def fits(size: int) -> None:
+        """The workspace's upload storage limit, counting this zip instead of
+        the one it replaces."""
+        cap = limits.value("upload_storage_mb", workspace_id)
+        if cap is None:
+            return
+        kept = sum(uploads.stored_bytes(r.id) for r in storage.load_repos(workspace_id))
+        if kept - uploads.version_bytes(repo_id, version) + size > cap * 1024 * 1024:
+            limits.refuse("upload_storage_mb", workspace_id=workspace_id, user_id=me.user.id, status=413)
+
     try:
-        await asyncio.to_thread(uploads.save, repo_id, version, file.file)
+        await asyncio.to_thread(uploads.save, repo_id, version, file.file,
+                                max_mb=limits.value("zip_mb", workspace_id),
+                                max_unpacked_mb=limits.value("unpacked_mb", workspace_id),
+                                before_replace=fits)
     except uploads.UploadError as e:
         raise HTTPException(400, f"zip rejected: {e}") from e
+
+
+def _check_new_repo(me: Principal, *, branches: int, interval_days: int) -> None:
+    ws = me.workspace_id
+    limits.check_count("repos_per_workspace", used=len(storage.load_repos(ws)),
+                       workspace_id=ws, user_id=me.user.id)
+    limits.check_max("branches_per_repo", branches, workspace_id=ws, user_id=me.user.id)
+    limits.check_min("min_interval_days", interval_days, workspace_id=ws, user_id=me.user.id)
 
 
 @router.post("/repos/upload", status_code=201)
@@ -389,9 +431,10 @@ async def create_upload_repo(file: UploadFile = File(...), meta: str = Form(...)
     if storage.get_repo(repo_id):
         raise HTTPException(409, f"repo '{repo_id}' already exists")
     version = upload_version(body.version)
+    _check_new_repo(me, branches=1, interval_days=body.interval_days)
     try:
-        await _store_zip(repo_id, version, file)
-    except HTTPException:
+        await _store_zip(repo_id, version, file, me, me.workspace_id)
+    except Exception:
         uploads.delete(repo_id)
         raise
     repo = Repo(
@@ -431,7 +474,10 @@ async def upload_version_zip(
     version = upload_version(version)
     if is_scanning(repo_id, version):
         raise HTTPException(409, "a scan of this version is in progress; try again once it finishes")
-    await _store_zip(repo_id, version, file)
+    if version not in repo.branches:
+        limits.check_max("branches_per_repo", len(repo.branches) + 1,
+                         workspace_id=repo.workspace_id, user_id=me.user.id)
+    await _store_zip(repo_id, version, file, me, repo.workspace_id)
     branches = repo.branches if version in repo.branches else [*repo.branches, version]
     repo = repo.model_copy(update={"branches": branches, "url": f"upload://{file.filename}"})
     storage.upsert_repo(repo)

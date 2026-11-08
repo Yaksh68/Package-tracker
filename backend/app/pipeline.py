@@ -13,7 +13,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from . import flags, scan_context, scanlog, settings_store, storage, uploads
+from . import flags, limits, scan_context, scanlog, settings_store, storage, uploads
 from .agents import apt_index, enrichment_agent, extraction_agent, image_inspect, source_apis
 from .agents.clone import CloneError, shallow_clone
 from .agents.image_inspect import ImageInspectError
@@ -187,7 +187,9 @@ async def run_scan(
                 # request (including the repo list the UI refetches right after
                 # POST /repos) stalls until the scan's I/O finishes.
                 if repo.source == "upload":
-                    clone = await asyncio.to_thread(uploads.unpack, repo.id, branch)
+                    clone = await asyncio.to_thread(
+                        uploads.unpack, repo.id, branch,
+                        max_unpacked_mb=limits.value("unpacked_mb", repo.workspace_id))
                     done_msg = f"Unpacked uploaded zip for version {branch} in {_since(t0)}s"
                 else:
                     clone = await asyncio.to_thread(

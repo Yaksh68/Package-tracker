@@ -312,6 +312,33 @@ export interface AdminWorkspace {
   repos: number;
 }
 
+/** Limit name → value, e.g. { repos_per_workspace: 10 }. */
+export type LimitValues = Record<string, number>;
+
+/** GET /api/limits: the active workspace's limits (public mode only). */
+export interface WorkspaceLimits {
+  enabled: boolean;
+  limits?: LimitValues;
+  /** What it uses now, for the limits it can run into. */
+  usage?: Record<string, number>;
+  labels?: Record<string, string>;
+}
+
+/** GET/PUT /api/admin/limits */
+export interface PlatformLimits {
+  limits: LimitValues;
+  defaults: LimitValues;
+  labels: Record<string, string>;
+}
+
+/** GET/PUT /api/admin/workspaces/{id}/limits */
+export interface AdminWorkspaceLimits {
+  overrides: LimitValues;
+  effective: LimitValues;
+  usage: Record<string, number>;
+  labels: Record<string, string>;
+}
+
 export interface AdminWorkspaceDetail {
   id: string;
   name: string;
