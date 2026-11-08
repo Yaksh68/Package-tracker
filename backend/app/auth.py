@@ -32,7 +32,7 @@ Public mode (AUTH_MODE=github):
 from __future__ import annotations
 
 import asyncio
-import html
+import logging
 import secrets
 from dataclasses import dataclass, field
 from urllib.parse import urlencode, urlsplit
@@ -49,6 +49,7 @@ from .models import LOCAL_WORKSPACE_ID, User, Workspace
 _AUTHORIZE = "https://github.com/login/oauth/authorize"
 _TOKEN = "https://github.com/login/oauth/access_token"
 _USER = "https://api.github.com/user"
+log = logging.getLogger("packages-tracker.auth")
 STATE_COOKIE = "pt_oauth_state"
 NEXT_COOKIE = "pt_oauth_next"
 CSRF_HEADER = "x-requested-with"
@@ -86,6 +87,15 @@ def _local_principal() -> Principal:
                      workspaces=[ws])
 
 
+def _resume_paused(user_id: str) -> None:
+    from . import housekeeping, scheduler  # (they import much of the app)
+    try:
+        if resumed := housekeeping.resume_for(user_id):
+            scheduler.resync_workspaces(resumed)
+    except Exception:  # noqa: BLE001 - never fail a request over this
+        log.exception("could not resume the paused workspaces of %s", user_id)
+
+
 def get_principal(request: Request) -> Principal:
     """FastAPI dependency: the caller and the workspace they're working in."""
     if not get_settings().public_mode():
@@ -93,7 +103,8 @@ def get_principal(request: Request) -> Principal:
     user = accounts.user_for_session(request.cookies.get(session_cookie_name()))
     if user is None:
         raise HTTPException(401, "sign in first")
-    accounts.touch_activity(user.id)
+    if accounts.touch_activity(user.id):
+        _resume_paused(user.id)  # their first visit today: wake any workspace that was paused
     workspaces = accounts.user_workspaces(user.id)
     wanted = request.headers.get("x-workspace")
     active = next((w for w in workspaces if w.id == wanted), None) if wanted else None

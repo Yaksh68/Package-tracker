@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import audit, scan_queue, storage, uploads
+from . import audit, housekeeping, scan_queue, storage, uploads
 from .models import Repo
 
 log = logging.getLogger("packages-tracker.scheduler")
@@ -58,6 +58,11 @@ async def _scan_job(repo_id: str, branch: str) -> None:
         return
     if repo.source == "upload" and not uploads.has_upload(repo_id, branch):
         return  # nothing to scan until a zip is uploaded for this version
+    if housekeeping.inactive(repo.workspace_id):
+        # nobody has used this workspace for a month: don't spend on it
+        housekeeping.mark_paused(repo.workspace_id)
+        log.info("scheduled scan for %s @ %s skipped: its workspace is inactive", repo_id, branch)
+        return
     if not scan_queue.enqueue(repo, branch, "scheduled"):
         # already queued or running (e.g. a manual scan got there first)
         log.info("scheduled scan for %s @ %s skipped: already queued or scanning", repo_id, branch)
@@ -67,12 +72,33 @@ async def _scan_job(repo_id: str, branch: str) -> None:
                  target_type="repo", target_id=repo.id, branch=branch)
 
 
+_UPKEEP_JOB = "upkeep"
+
+
+def _upkeep_job() -> None:
+    """Daily: history retention (housekeeping.py). Runs in a worker thread."""
+    housekeeping.prune_history()
+
+
+def resync_workspaces(workspace_ids: list[str]) -> None:
+    """Reschedule these workspaces' repos, e.g. after a pause ends: overdue
+    branches get their catch-up scans now rather than an interval from now."""
+    for ws in workspace_ids:
+        for repo in storage.load_repos(ws):
+            sync_repo(repo)
+
+
 def start() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
         _scheduler = AsyncIOScheduler(timezone="UTC")
         _scheduler.start()
         sync_all()
+        _scheduler.add_job(
+            _upkeep_job, "interval", hours=24, id=_UPKEEP_JOB, replace_existing=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
+            coalesce=True, misfire_grace_time=None, max_instances=1,
+        )
     return _scheduler
 
 
@@ -159,7 +185,8 @@ def unsync_repo(repo_id: str) -> None:
 def sync_all() -> None:
     if _scheduler is None:
         return
-    existing = {j.id for j in _scheduler.get_jobs()}
+    # only scan jobs: the daily upkeep job isn't a repo's
+    existing = {j.id for j in _scheduler.get_jobs() if j.id.startswith(_JOB_PREFIX)}
     wanted = set()
     slot = 0  # running catch-up counter, so overdue branches spread across repos
     for repo in storage.load_repos():

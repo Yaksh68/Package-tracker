@@ -548,10 +548,12 @@ def secret_hints(workspace_id: str) -> dict[str, dict]:
 _active: set[tuple[str, date]] = set()  # in-process: one write per user per day
 
 
-def touch_activity(user_id: str) -> None:
+def touch_activity(user_id: str) -> bool:
+    """Record that the user is here today. True the first time today (in
+    this process), when it was written down."""
     today = _now().date()
     if (user_id, today) in _active:
-        return
+        return False
     try:
         with session() as s:
             s.execute(_insert(UserActivityDayRow).values(user_id=user_id, day=today)
@@ -559,10 +561,11 @@ def touch_activity(user_id: str) -> None:
             s.execute(update(UserRow).where(UserRow.id == user_id).values(last_seen_at=_now()))
     except Exception:  # noqa: BLE001
         log.exception("could not record activity for %s", user_id)
-        return
+        return False
     if len(_active) > 10_000:
         _active.clear()
     _active.add((user_id, today))
+    return True
 
 
 def record_event(event: str, *, workspace_id: str | None = None, user_id: str | None = None,

@@ -30,6 +30,8 @@ const ACTIONS: Record<string, string> = {
   "invite.decline": "Declined an invite",
   "admin.view_workspace": "Viewed this workspace (platform admin)",
   "admin.limits": "Changed this workspace's limits (platform admin)",
+  "workspace.scans_paused": "Paused scheduled scans: nobody had used the workspace for 30 days",
+  "workspace.scans_resumed": "Came back, which resumed scheduled scans",
 };
 
 const SECRET_LABEL: Record<string, string> = {

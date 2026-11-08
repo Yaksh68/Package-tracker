@@ -283,6 +283,29 @@ def upsert_index_entry(repo_id: str, branch: str, summary: SnapshotSummary) -> N
         _apply_summary(_snapshot(s, repo_id, branch, summary.ts, create=True), summary)
 
 
+def snapshot_branches() -> list[tuple[str, str]]:
+    """Every (repo_id, branch) that has history."""
+    with session() as s:
+        return [tuple(r) for r in s.execute(select(SnapshotRow.repo_id, SnapshotRow.branch).distinct())]
+
+
+def prune_snapshots(repo_id: str, branch: str, keep: int) -> int:
+    """Keep the branch's newest `keep` listed snapshots (at least one); delete
+    older ones, and unlisted traces (failed scans) older than the oldest kept.
+    Their packages, findings and logs go with them. Returns how many went."""
+    keep = max(1, keep)
+    with session() as s:
+        listed = list(s.scalars(select(SnapshotRow.ts).where(
+            SnapshotRow.repo_id == repo_id, SnapshotRow.branch == branch, SnapshotRow.indexed)
+            .order_by(SnapshotRow.ts.desc()).limit(keep)))
+        if len(listed) < keep:
+            return 0
+        # ts sorts as time (2026-07-13T10-30-00Z); everything before the oldest kept goes
+        return s.execute(delete(SnapshotRow).where(
+            SnapshotRow.repo_id == repo_id, SnapshotRow.branch == branch,
+            SnapshotRow.ts < listed[-1])).rowcount or 0
+
+
 def latest_snapshot_ts(repo_id: str, branch: str) -> str | None:
     with session() as s:
         return s.scalar(select(SnapshotRow.ts).where(

@@ -224,6 +224,8 @@ export interface Me {
   /** What each role may do (the server's table). */
   role_permissions: Record<Role, Perm[]>;
   workspaces: Workspace[];
+  /** Scheduled scans paused for inactivity: now (resumed_at null) or until recently. */
+  scans_paused?: { paused_at: string; resumed_at: string | null } | null;
 }
 
 /** GET /api/info: what anyone may know, signed in or not. */

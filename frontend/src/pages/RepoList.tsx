@@ -120,6 +120,49 @@ function cacheRepo(qc: QueryClient, repo: Repo, state: string) {
   });
 }
 
+/** Scheduled scans paused because nobody used the workspace for 30 days:
+ *  shown until dismissed (per browser), for two weeks after they resume. */
+function PauseNotice() {
+  const { me } = useSession();
+  const notice = me.scans_paused;
+  const key = notice ? `packages-tracker.pause-notice.${me.workspace_id}.${notice.resumed_at ?? "paused"}` : "";
+  const [dismissed, setDismissed] = useState(() => {
+    try {
+      return !!key && localStorage.getItem(key) === "1";
+    } catch {
+      return false;
+    }
+  });
+  if (!notice || dismissed) return null;
+  const dismiss = () => {
+    setDismissed(true);
+    try {
+      localStorage.setItem(key, "1");
+    } catch {
+      /* storage blocked: it just comes back on reload */
+    }
+  };
+  return notice.resumed_at ? (
+    <Alert
+      type="info"
+      showIcon
+      closable
+      onClose={dismiss}
+      style={{ marginBottom: 16 }}
+      message="Scheduled scans are running again"
+      description={`They were paused from ${fmtDate(notice.paused_at)} to ${fmtDate(notice.resumed_at)}, because nobody in this workspace had used Packages Tracker for 30 days. Overdue branches are being scanned now.`}
+    />
+  ) : (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: 16 }}
+      message="Scheduled scans are paused"
+      description={`Nobody in this workspace had used Packages Tracker for 30 days, so scheduled scans stopped on ${fmtDate(notice.paused_at)}. They resume when a member signs in.`}
+    />
+  );
+}
+
 export function RepoList() {
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -223,6 +266,7 @@ export function RepoList() {
         </Typography.Title>
         {addButton}
       </Space>
+      <PauseNotice />
 
       {reposQuery.isError ? (
         <Alert
