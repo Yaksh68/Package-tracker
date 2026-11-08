@@ -89,6 +89,7 @@ ROUTE_PERMS: dict[tuple[str, str], Perm | str] = {
     # settings and secrets of the active workspace
     ("GET", "/api/settings"): Perm.VIEW,
     ("PUT", "/api/settings"): Perm.SETTINGS,
+    ("POST", "/api/settings/ai-test"): Perm.SETTINGS,
     ("PUT", "/api/secrets/{name}"): Perm.SECRETS,
     ("DELETE", "/api/secrets/{name}"): Perm.SECRETS,
     # repos (the active workspace's, or the repo's own)

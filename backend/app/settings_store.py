@@ -15,9 +15,13 @@ local workspace outside a scan.
 """
 from __future__ import annotations
 
+import ipaddress
+from urllib.parse import urlsplit
+
 from . import accounts, scan_context
 from .ai.config import PRESET_BASE_URLS
 from .config import get_settings
+from .git_rules import RepoUrlError, public_addresses
 from .models import LOCAL_WORKSPACE_ID
 
 _BOOL_KEYS = {"use_enrichment_agent", "use_extraction_agent"}
@@ -69,10 +73,40 @@ def _clean(patch: dict) -> dict:
         out["search_provider"] = search = search.lower()
         if search not in SEARCH_PROVIDERS:
             raise ValueError(f"unknown search provider {search!r}")
-    base_url = out.get("ai_base_url")
-    if base_url and not base_url.lower().startswith(("https://", "http://")):
-        raise ValueError("the AI base URL must start with https:// or http://")
+    if out.get("ai_base_url"):
+        check_ai_base_url(out["ai_base_url"])
     return out
+
+
+def check_ai_base_url(url: str) -> None:
+    """Raise ValueError for a base URL the server shouldn't call. The local
+    mode takes any http(s) URL (a local Ollama, say). In the public mode it's
+    a URL a user typed, which the server then calls, so it must be https on a
+    hostname that resolves to public addresses only. The scan checks the
+    address again on every request (safe_http)."""
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 (raises ValueError for a bad port)
+    except ValueError as e:
+        raise ValueError(f"that isn't a valid URL: {e}") from e
+    if parts.scheme not in ("https", "http") or not parts.hostname:
+        raise ValueError("the AI base URL must start with https:// or http://")
+    if not get_settings().public_mode():
+        return
+    if parts.scheme != "https":
+        raise ValueError("the AI base URL must start with https://")
+    if parts.username or parts.password:
+        raise ValueError("put the key in the API key field, not in the URL")
+    try:
+        ipaddress.ip_address(parts.hostname)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("use the provider's hostname, not an IP address")
+    try:
+        public_addresses(parts.hostname)
+    except RepoUrlError as e:
+        raise ValueError(str(e)) from e
 
 
 def update_runtime_settings(patch: dict, workspace_id: str | None = None) -> dict:

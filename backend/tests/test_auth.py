@@ -59,9 +59,10 @@ def _fake_github(monkeypatch, *, profile: dict, token: str = "gho_from_github"):
                         lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
 
-def _oauth_sign_in(c: TestClient):
+def _oauth_sign_in(c: TestClient, next_page: str | None = None):
     """Run login → callback; returns the callback response."""
-    login = c.get("/api/auth/github/login", follow_redirects=False)
+    login = c.get("/api/auth/github/login", params={"next": next_page} if next_page else None,
+                  follow_redirects=False)
     assert login.status_code == 302
     state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
     return c.get(f"/api/auth/github/callback?code=the-code&state={state}", follow_redirects=False)
@@ -97,7 +98,26 @@ def test_a_wrong_state_is_refused(public, monkeypatch):
     c = _client()
     c.get("/api/auth/github/login", follow_redirects=False)
     r = c.get("/api/auth/github/callback?code=the-code&state=forged", follow_redirects=False)
-    assert r.status_code == 400 and c.get("/api/me").status_code == 401
+    assert r.status_code == 302 and r.headers["location"] == "/login?error=expired"
+    assert c.get("/api/me").status_code == 401
+
+
+def test_cancelling_on_github_returns_to_the_sign_in_page(public):
+    r = _client().get("/api/auth/github/callback?error=access_denied", follow_redirects=False)
+    assert r.headers["location"] == "/login?error=cancelled"
+
+
+def test_sign_in_returns_to_the_page_it_started_from(public, monkeypatch):
+    _fake_github(monkeypatch, profile={"id": 77, "login": "invitee"})
+    r = _oauth_sign_in(_client(), "/invite/tok123?x=1")
+    assert r.status_code == 302 and r.headers["location"] == "/invite/tok123?x=1"
+
+
+@pytest.mark.parametrize("target", ["//evil.example/x", "https://evil.example", "/api/me",
+                                    "/" + chr(92) + "evil.example", "javascript:alert(1)"])
+def test_sign_in_never_returns_off_site(public, monkeypatch, target):
+    _fake_github(monkeypatch, profile={"id": 78, "login": "careful"})
+    assert _oauth_sign_in(_client(), target).headers["location"] == "/"
 
 
 def test_sign_ups_stop_at_the_cap_but_admins_get_in(public, monkeypatch):
@@ -106,7 +126,7 @@ def test_sign_ups_stop_at_the_cap_but_admins_get_in(public, monkeypatch):
     _signed_in(1, "first")
     _fake_github(monkeypatch, profile={"id": 2, "login": "second"})
     r = _oauth_sign_in(_client())
-    assert r.status_code == 403 and "full" in r.text
+    assert r.status_code == 302 and r.headers["location"] == "/login?error=full"
     _fake_github(monkeypatch, profile={"id": 3, "login": "theadmin"})  # case-insensitive match
     c = _client()
     assert _oauth_sign_in(c).status_code == 302
@@ -128,7 +148,7 @@ def test_disabled_users_lose_their_sessions_and_cant_sign_in(public, monkeypatch
     accounts.set_user_status(user.id, "disabled")
     assert c.get("/api/me").status_code == 401
     _fake_github(monkeypatch, profile={"id": 5, "login": "gone"})
-    assert _oauth_sign_in(_client()).status_code == 403
+    assert _oauth_sign_in(_client()).headers["location"] == "/login?error=disabled"
 
 
 def test_logout_ends_the_session(public):

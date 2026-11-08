@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .. import accounts, audit, rbac, scanlog, scheduler, settings_store, storage, uploads
 from .. import flags as flags_mod
+from ..ai import probe
+from ..ai.errors import AiError, redact_keys
 from ..auth import Principal, get_principal, session_cookie_name
 from ..config import get_settings
 from ..git_rules import RepoUrlError, check_branch
@@ -59,6 +61,9 @@ def me_route(me: Principal = Depends(get_principal)) -> dict:
         "role": me.role,
         # what the caller may do in the active workspace (the UI disables the rest)
         "permissions": rbac.permissions(me.role),
+        # what each role may do, so the UI can name the role a control needs
+        # and judge a repo from another of the caller's workspaces
+        "role_permissions": {r: rbac.permissions(r) for r in rbac.ROLES},
         "workspaces": [w.model_dump() for w in me.workspaces],
     }
 
@@ -112,6 +117,33 @@ def update_settings_route(patch: dict, me: Principal = Depends(get_principal)) -
     if "use_enrichment_agent" in patch:
         _event(me, "ai_toggle", on=bool(out["use_enrichment_agent"]))
     return {**out, "secrets": _secrets_view(me)}
+
+
+class AiTestBody(BaseModel):
+    provider: str = Field(max_length=40)
+    base_url: str | None = Field(default=None, max_length=500)
+    # a key typed into the form and not saved yet; without one, the saved key
+    api_key: str | None = Field(default=None, max_length=4096)
+
+
+@router.post("/settings/ai-test")
+async def test_ai_connection(body: AiTestBody, me: Principal = Depends(get_principal)) -> dict:
+    """"Test connection": the models the provider offers with this key, or
+    why it refused. Uses the key in the body (which isn't saved), or else the
+    workspace's saved key. Listing models costs no tokens."""
+    base_url = (body.base_url or "").strip() if body.provider == "openai-compatible" else ""
+    if base_url:
+        try:
+            await asyncio.to_thread(settings_store.check_ai_base_url, base_url)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+    key = (body.api_key or "").strip() or await asyncio.to_thread(
+        accounts.get_secret, me.workspace_id, "ai_api_key")
+    try:
+        models = await probe.test_connection(body.provider, api_key=key, base_url=base_url or None)
+    except AiError as e:
+        return {"ok": False, "kind": e.kind, "message": redact_keys(str(e)), "models": []}
+    return {"ok": True, "models": models}
 
 
 class SecretValue(BaseModel):
@@ -422,6 +454,11 @@ def scan_log(repo_id: str, branch: str = Query(...), ts: str | None = None,
     run; pass ?ts=<snapshot> to read a persisted trace from that snapshot."""
     repo = _require_repo(repo_id, me)
     _require_branch(repo, branch)
+    log = _scan_log(repo_id, branch, ts)
+    return {**log, "ai_usage": _ai_usage(repo_id, branch, log.get("snapshot_ts"))}
+
+
+def _scan_log(repo_id: str, branch: str, ts: str | None) -> dict:
     if ts:
         persisted = storage.read_scan_log(repo_id, branch, ts)
         if persisted is None:
@@ -437,6 +474,19 @@ def scan_log(repo_id: str, branch: str = Query(...), ts: str | None = None,
         if persisted is not None:
             return persisted
     return {"repo_id": repo_id, "branch": branch, "snapshot_ts": None, "state": "idle", "entries": []}
+
+
+def _ai_usage(repo_id: str, branch: str, ts: str | None) -> dict | None:
+    """What that scan's AI research used, from its scan_runs row. None while
+    the scan is still running, or for scans from before scan_runs existed."""
+    run = storage.scan_run_for(repo_id, branch, ts) if ts else None
+    if run is None:
+        return None
+    return {"status": run.ai_status, "detail": run.ai_detail, "provider": run.ai_provider,
+            "model": run.ai_model, "batches": run.ai_batches, "failed_batches": run.ai_failed_batches,
+            "tokens_in": run.ai_tokens_in, "tokens_out": run.ai_tokens_out,
+            "searches": run.ai_searches, "cost_usd": run.ai_cost_usd,
+            "seconds": run.stage_seconds.get("ai")}
 
 
 # --------------------------------------------------------------------------- #

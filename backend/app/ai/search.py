@@ -4,7 +4,8 @@ with no built-in search (the OpenAI-compatible ones).
 Search goes through Tavily or Exa with the workspace's own key. `fetch_text`
 fetches only public http(s) addresses: every redirect hop is re-checked, and
 size and time are capped. A model can't use it to reach internal services, and
-a huge page can't exhaust memory.
+a huge page can't exhaust memory. Callers pass a `safe_http.public_client()`,
+which also checks the address it actually connects to.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from ..git_rules import RepoUrlError, require_public_address
+from ..safe_http import AddressRefused
 from .errors import AiAuthError, AiProviderError, AiQuotaError
 
 _TIMEOUT = httpx.Timeout(20.0)
@@ -168,23 +170,30 @@ async def fetch_text(url: str, client: httpx.AsyncClient, *, max_redirects: int 
     current = url
     for _ in range(max_redirects + 1):
         await _check_public(current)
-        async with client.stream("GET", current, timeout=_FETCH_TIMEOUT,
-                                 follow_redirects=False) as r:
-            if r.is_redirect and r.headers.get("location"):
-                current = urljoin(current, r.headers["location"])
-                continue
-            if r.status_code != 200:
-                raise FetchRefused(f"the page returned HTTP {r.status_code}")
-            kind = r.headers.get("content-type", "").split(";")[0].strip().lower()
-            if kind and not (kind.startswith("text/") or kind in ("application/json", "application/xhtml+xml")):
-                raise FetchRefused(f"not a text page ({kind})")
-            body = bytearray()
-            async for chunk in r.aiter_bytes():
-                body.extend(chunk)
-                if len(body) > _FETCH_MAX_BYTES:
-                    break
-            text = body.decode(r.encoding or "utf-8", errors="replace")
-            if "html" in kind or "<html" in text[:500].lower():
-                text = html_to_text(text)
-            return current, text[:_FETCH_MAX_CHARS]
+        try:
+            async with client.stream("GET", current, timeout=_FETCH_TIMEOUT,
+                                     follow_redirects=False) as r:
+                if r.is_redirect and r.headers.get("location"):
+                    current = urljoin(current, r.headers["location"])
+                    continue
+                return current, await _page_text(r)
+        except AddressRefused as e:  # the address the client was about to connect to
+            raise FetchRefused(str(e)) from e
     raise FetchRefused("too many redirects")
+
+
+async def _page_text(r: httpx.Response) -> str:
+    if r.status_code != 200:
+        raise FetchRefused(f"the page returned HTTP {r.status_code}")
+    kind = r.headers.get("content-type", "").split(";")[0].strip().lower()
+    if kind and not (kind.startswith("text/") or kind in ("application/json", "application/xhtml+xml")):
+        raise FetchRefused(f"not a text page ({kind})")
+    body = bytearray()
+    async for chunk in r.aiter_bytes():
+        body.extend(chunk)
+        if len(body) > _FETCH_MAX_BYTES:
+            break
+    text = body.decode(r.encoding or "utf-8", errors="replace")
+    if "html" in kind or "<html" in text[:500].lower():
+        text = html_to_text(text)
+    return text[:_FETCH_MAX_CHARS]

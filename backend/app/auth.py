@@ -22,6 +22,10 @@ Public mode (AUTH_MODE=github):
   never allowed.
 - Sign-up is capped at MAX_USERS. Platform admins (PLATFORM_ADMINS) can
   always sign in; disabled users can't.
+- A failed sign-in redirects to the app's /login page with an `error` code
+  (cancelled, expired, github, disabled, full), which the page explains.
+  `/api/auth/github/login?next=/some/page` returns there after signing in;
+  only a path on this site is accepted.
 - The active workspace comes from the X-Workspace header, defaulting to the
   user's personal workspace. A workspace the user isn't in is a 404.
 """
@@ -35,7 +39,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import accounts, storage
@@ -46,6 +50,7 @@ _AUTHORIZE = "https://github.com/login/oauth/authorize"
 _TOKEN = "https://github.com/login/oauth/access_token"
 _USER = "https://api.github.com/user"
 STATE_COOKIE = "pt_oauth_state"
+NEXT_COOKIE = "pt_oauth_next"
 CSRF_HEADER = "x-requested-with"
 CSRF_VALUE = "packages-tracker"
 
@@ -140,10 +145,26 @@ def _callback_url() -> str:
     return get_settings().public_base_url.rstrip("/") + "/api/auth/github/callback"
 
 
-def _page(status: int, message: str) -> HTMLResponse:
-    body = (f"<!doctype html><meta charset=utf-8><title>Packages Tracker</title>"
-            f"<p>{html.escape(message)}</p><p><a href='/'>Back to Packages Tracker</a></p>")
-    return HTMLResponse(body, status_code=status)
+def _failed(code: str) -> RedirectResponse:
+    """Back to the app's sign-in page, which explains the code."""
+    resp = RedirectResponse(f"/login?error={code}", status_code=302)
+    resp.delete_cookie(STATE_COOKIE, path="/api/auth")
+    resp.delete_cookie(NEXT_COOKIE, path="/api/auth")
+    return resp
+
+
+_NOT_IN_NEXT = ("\\", "\r", "\n", "\t")  # browsers read a backslash as a slash
+
+
+def safe_next(path: str | None) -> str:
+    """A page on this site to return to after signing in. Anything that could
+    leave the site (`//evil.example`, a backslash variant of it, a full URL)
+    or point at the API becomes "/"."""
+    if (not path or len(path) > 500 or not path.startswith("/") or path.startswith("//")
+            or any(c in path for c in _NOT_IN_NEXT) or path.startswith("/api/")):
+        return "/"
+    parts = urlsplit(path)
+    return "/" if parts.scheme or parts.netloc else path
 
 
 def _public_only() -> None:
@@ -152,7 +173,7 @@ def _public_only() -> None:
 
 
 @router.get("/auth/github/login")
-def github_login() -> RedirectResponse:
+def github_login(next: str | None = None) -> RedirectResponse:  # noqa: A002 (the query name)
     _public_only()
     s = get_settings()
     if not (s.github_oauth_client_id and s.github_oauth_client_secret):
@@ -163,6 +184,9 @@ def github_login() -> RedirectResponse:
     resp = RedirectResponse(f"{_AUTHORIZE}?{query}", status_code=302)
     resp.set_cookie(STATE_COOKIE, state, max_age=600, httponly=True, secure=s.https(),
                     samesite="lax", path="/api/auth")
+    if (target := safe_next(next)) != "/":
+        resp.set_cookie(NEXT_COOKIE, target, max_age=600, httponly=True, secure=s.https(),
+                        samesite="lax", path="/api/auth")
     return resp
 
 
@@ -194,24 +218,24 @@ async def github_callback(request: Request, code: str | None = None, state: str 
     s = get_settings()
     expected = request.cookies.get(STATE_COOKIE)
     if error:
-        return _page(400, "GitHub sign-in was cancelled.")
+        return _failed("cancelled")
     if not (code and state and expected and secrets.compare_digest(state, expected)):
-        return _page(400, "That sign-in link has expired or isn't valid. Please try again.")
+        return _failed("expired")
     try:
         got = await _exchange(code)
     except httpx.HTTPError:
         got = None
     if got is None:
-        return _page(502, "GitHub didn't complete the sign-in. Please try again.")
+        return _failed("github")
     token, profile = got
     admin = str(profile["login"]).lower() in s.admin_logins()
 
     existing = await asyncio.to_thread(accounts.find_github_user, int(profile["id"]))
     if existing is not None and existing.status != "active":
-        return _page(403, "This account is disabled.")
+        return _failed("disabled")
     if (existing is None and not admin
             and await asyncio.to_thread(accounts.count_github_users) >= s.max_users):
-        return _page(403, "Sign-ups are full right now. Please try again later.")
+        return _failed("full")
 
     user, created = await asyncio.to_thread(accounts.sign_in_github_user, profile, token, admin=admin)
     if admin and await asyncio.to_thread(storage.load_repos, LOCAL_WORKSPACE_ID):
@@ -221,7 +245,8 @@ async def github_callback(request: Request, code: str | None = None, state: str 
     accounts.record_event("sign_up" if created else "sign_in", user_id=user.id)
     session_token = await asyncio.to_thread(accounts.create_session, user.id,
                                             request.headers.get("user-agent"))
-    resp = RedirectResponse("/", status_code=302)
+    resp = RedirectResponse(safe_next(request.cookies.get(NEXT_COOKIE)), status_code=302)
+    resp.delete_cookie(NEXT_COOKIE, path="/api/auth")
     resp.set_cookie(session_cookie_name(), session_token,
                     max_age=s.session_days * 86400, httponly=True, secure=s.https(),
                     samesite="lax", path="/")

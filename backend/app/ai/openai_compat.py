@@ -9,6 +9,10 @@ two tools itself:
 
 Every URL those tools return is recorded, and the citation check
 (citations.enforce) drops any source the model cites outside that set.
+
+In the public mode a custom base URL is reached through
+safe_http.public_client(), so it can't point the server at internal
+addresses, by DNS or by redirect. Page fetches always go through it.
 """
 from __future__ import annotations
 
@@ -19,6 +23,8 @@ from urllib.parse import urlsplit
 import httpx
 import openai
 
+from ..config import get_settings
+from ..safe_http import AddressRefused, public_client
 from .citations import normalize
 from .config import AiConfig
 from .errors import AiAuthError, AiConfigError, AiError, AiProviderError, AiQuotaError, AiTimeoutError, redact_keys
@@ -28,6 +34,7 @@ from .search import FetchRefused, fetch_text, make_search
 
 _TOOL_RESULT_CHARS = 16_000
 _SEARCH_RESULTS = 5
+_UA = {"User-Agent": "packages-tracker/0.1"}
 
 TOOLS = [
     {"type": "function", "function": {
@@ -58,6 +65,8 @@ _TOOL_RULES = (
 def _map_error(e: Exception, cfg: AiConfig) -> AiError:
     who = cfg.preset or urlsplit(cfg.base_url or "").hostname or "the provider"
     msg = redact_keys(str(getattr(e, "message", None) or e))[:300]
+    if isinstance(e, openai.APIConnectionError) and isinstance(e.__cause__, AddressRefused):
+        return AiConfigError(f"the base URL can't be used: {e.__cause__}")
     if isinstance(e, openai.AuthenticationError | openai.PermissionDeniedError):
         return AiAuthError(f"{who} rejected the API key: {msg}")
     if isinstance(e, openai.RateLimitError):
@@ -173,12 +182,22 @@ async def _research(client, session: _Session, cfg: AiConfig, prompt: str, syste
                        usage=usage, seen_urls=set(session.seen))
 
 
+def _client(cfg: AiConfig, timeout: float) -> openai.AsyncOpenAI:
+    """The SDK client. A custom base URL in the public mode is a URL a user
+    typed, so it goes through the public-only transport; the presets' URLs
+    are our own constants."""
+    guarded = cfg.preset is None and get_settings().public_mode()
+    return openai.AsyncOpenAI(api_key=cfg.api_key or "not-needed", base_url=cfg.base_url,
+                              timeout=timeout, max_retries=1,
+                              http_client=public_client(timeout=timeout) if guarded else None)
+
+
 async def research(cfg: AiConfig, prompt: str, system: str, *, max_searches: int,
                    timeout: float) -> AgentResult:
-    client = openai.AsyncOpenAI(api_key=cfg.api_key or "not-needed", base_url=cfg.base_url,
-                                timeout=timeout, max_retries=1)
-    async with httpx.AsyncClient(headers={"User-Agent": "packages-tracker/0.1"}) as http:
-        session = _Session(make_search(cfg.search_provider, cfg.search_api_key, http), http, max_searches)
+    client = _client(cfg, timeout)
+    # search APIs are fixed hosts; pages are whatever the search returned
+    async with httpx.AsyncClient(headers=_UA) as http, public_client(headers=_UA) as pages:
+        session = _Session(make_search(cfg.search_provider, cfg.search_api_key, http), pages, max_searches)
         try:
             return await asyncio.wait_for(_research(client, session, cfg, prompt, system),
                                           timeout=timeout * 2)
@@ -190,13 +209,29 @@ async def research(cfg: AiConfig, prompt: str, system: str, *, max_searches: int
             await client.close()
 
 
+# ids that are plainly not chat models (embeddings, speech, images, moderation)
+_NOT_CHAT = ("embed", "tts", "whisper", "dall-e", "moderation", "transcribe", "audio",
+             "realtime", "image", "imagen", "veo", "davinci", "babbage", "aqa")
+
+
 async def list_models(cfg: AiConfig) -> list[str]:
-    """Model IDs at this endpoint (GET /models). Used by "Test connection"."""
-    client = openai.AsyncOpenAI(api_key=cfg.api_key or "not-needed", base_url=cfg.base_url,
-                                timeout=20.0, max_retries=1)
+    """Chat model IDs at this endpoint (GET /models, which costs no tokens).
+    Used by "Test connection".
+    - OpenRouter lists models without checking the key, so its key is
+      checked first (GET /key).
+    - Where the listing says which models take tools (OpenRouter does), only
+      those are kept: research needs tool calling. Free ones come first.
+    """
+    client = _client(cfg, 20.0)
     try:
-        return [m.id async for m in client.models.list()]
+        if cfg.preset == "openrouter":
+            await client.get("/key", cast_to=object)  # 401 for a bad key
+        models = [m async for m in client.models.list()]
     except openai.APIError as e:
         raise _map_error(e, cfg) from e
     finally:
         await client.close()
+    if any(getattr(m, "supported_parameters", None) is not None for m in models):
+        models = [m for m in models if "tools" in (getattr(m, "supported_parameters", None) or ())]
+    ids = sorted({m.id for m in models if not any(w in m.id.lower() for w in _NOT_CHAT)})
+    return sorted(ids, key=lambda i: not i.endswith(":free"))
