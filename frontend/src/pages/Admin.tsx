@@ -206,8 +206,8 @@ function WorkspacesTab() {
 }
 
 export function AdminPage() {
-  const { isPlatformAdmin } = useSession();
-  if (!isPlatformAdmin) return <Result status="404" title="Page not found" />;
+  const { isPlatformAdmin, isPublic } = useSession();
+  if (!isPlatformAdmin || !isPublic) return <Result status="404" title="Page not found" />;
   return (
     <div>
       <Typography.Title level={3} style={{ marginTop: 0 }}>Admin</Typography.Title>

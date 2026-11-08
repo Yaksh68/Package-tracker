@@ -36,7 +36,8 @@ function Nav() {
     { key: "/settings", label: "Settings" },
     ...(isPublic ? [{ key: "/members", label: "Members" }] : []),
     ...(can("audit") ? [{ key: "/audit", label: "Audit log" }] : []),
-    ...(isPlatformAdmin ? [{ key: "/admin", label: "Admin" }] : []),
+    // the local mode's built-in user owns everything, but there are no accounts to administer
+    ...(isPublic && isPlatformAdmin ? [{ key: "/admin", label: "Admin" }] : []),
   ];
   const selected = items.find((i) => i.key !== "/" && pathname.startsWith(i.key))?.key
     ?? (pathname === "/" || pathname.startsWith("/repos") ? "/" : "");
