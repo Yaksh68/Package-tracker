@@ -1,6 +1,6 @@
 # Cloud deployment: public multi-user Packages Tracker (implementation plan)
 
-> **Status:** Phases 0 and 1 are merged (2026-11-07). Phase 2a is done on `phase-2a-accounts` (2026-11-08). Each phase ships as its own branch and pull request.
+> **Status:** Phases 0 and 1 are merged (2026-11-07), and so is Phase 2a (2026-11-08). Phase 2b is done on `phase-2b-rbac` (2026-11-08). Each phase ships as its own branch and pull request.
 >
 > **Decisions locked (2026-11-07):**
 > 1. **Public multi-user service.** People sign in, work in **workspaces** (teams), and bring their own AI keys.
@@ -275,7 +275,8 @@ Everything in this phase also protects local installs.
 ### Phase 2b: roles, invites, audit log
 
 **2b.1 Permissions** (`rbac.py`)
-- Ordered roles, a list of permissions, one table mapping roles to permissions, and a `require(permission)` dependency.
+- Ordered roles, a list of permissions, and one table mapping roles to permissions.
+- As built: a second table, `ROUTE_PERMS`, names the permission every route needs, and one router dependency, `authorize`, checks it before the handler runs. A route missing from the table fails closed.
 - Non-members get 404, so they can't even tell a repo exists. Members without the permission get 403.
 
 | Action | Viewer | Editor | Admin | Owner |
@@ -295,6 +296,8 @@ Everything in this phase also protects local installs.
 - Create, rename, transfer and delete team workspaces.
 - The last Owner can't leave or be demoted.
 - Roles are checked on every request, so removing someone takes effect immediately.
+- A personal workspace belongs to its account alone: no invites, no transfer, no leaving. Working with others happens in team workspaces.
+- Deleting an account also deletes the team workspaces its user was the only member of. When a platform admin deletes the last Owner of a team that has other members, the member with the highest role becomes Owner, and the team's audit log records it.
 
 **2b.3 Invites**
 - Invite by GitHub login (it waits until that person signs in) or by a one-time link.
@@ -308,8 +311,9 @@ Everything in this phase also protects local installs.
 
 **2b.5 Platform admin**
 - Granted at sign-in to the logins listed in `PLATFORM_ADMINS`.
-- New endpoints: `/api/admin/users` (list, disable, enable, delete) and `/api/admin/limits`.
+- New endpoints: `/api/admin/users` (list, disable, enable, delete) and `/api/admin/workspaces` (list, and one workspace's members and repos). `/api/admin/limits` moved to Phase 4, where the limits themselves arrive.
 - The platform admin sees usage and metadata, but not scan results or keys, unless they're also a member of that workspace.
+- Disabling a user signs them out everywhere at once.
 
 **Tests:**
 - every `/api` route either declares a permission or is explicitly public; a test walks the route table to check;
@@ -318,6 +322,8 @@ Everything in this phase also protects local installs.
 - invite expiry and single use;
 - an audit entry for every action that changes data;
 - admin endpoints return 404 to non-admins.
+
+Done 2026-11-08: 405 backend tests pass, 33 of them new in `test_rbac.py`.
 
 ---
 
@@ -358,7 +364,7 @@ Everything in this phase also protects local installs.
 - The UI can show each scan's place in the queue.
 
 **4.2 Limits**
-- Platform-wide defaults are editable in the admin area, and can be overridden per workspace.
+- Platform-wide defaults are editable in the admin area (`/api/admin/limits`), and can be overridden per workspace.
 - The server enforces every limit with a clear message, and each time a limit is hit it's recorded in `usage_events`.
 
 | Limit | Default |
@@ -380,7 +386,7 @@ Everything in this phase also protects local installs.
 
 **4.4 Retention:** a daily job deletes snapshots beyond the per-branch limit. The newest snapshot is always kept.
 
-**4.5 Inactive workspaces:** if no member signs in for 30 days, the workspace's scheduled scans pause. They resume at the next sign-in, and a banner explains what happened.
+**4.5 Inactive workspaces:** if no member signs in for 30 days, the workspace's scheduled scans pause. They resume at the next sign-in, and a banner explains what happened. A workspace whose members are all disabled pauses at once, rather than after 30 days.
 
 **4.6 Rate limits** on sign-in and on the API, per IP address and per user, kept in memory.
 

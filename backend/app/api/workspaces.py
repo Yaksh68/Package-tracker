@@ -5,7 +5,9 @@ rbac.ROUTE_PERMS, and a workspace you aren't in is a 404. The rules here are
 the ones a permission alone can't express:
 - only an Owner can make someone an Owner, or change or remove an Owner;
 - the last Owner can't leave, be demoted or be removed;
-- a personal workspace can't be deleted (delete the account instead);
+- a personal workspace belongs to its account alone: it can't take invites,
+  be transferred, be left or be deleted (deleting the account deletes it).
+  Working with others happens in team workspaces;
 - team workspaces, members and invites exist only in the public mode. The
   local mode has a single user.
 """
@@ -56,6 +58,15 @@ def _public_only() -> None:
         raise HTTPException(404, "there are no team workspaces in the local mode")
 
 
+def _not_personal(workspace_id: str, message: str) -> None:
+    ws = accounts.get_workspace(workspace_id)
+    if ws is not None and ws.personal:
+        raise HTTPException(400, message)
+
+
+_PERSONAL = "a personal workspace is just yours: create a team workspace to work with others"
+
+
 def _audit(me: Principal, action: str, workspace_id: str | None, **kw) -> None:
     audit.record(action, workspace_id=workspace_id, actor=me, **kw)
 
@@ -104,6 +115,7 @@ def transfer_ownership(workspace_id: str, body: TransferBody,
                        me: Principal = Depends(get_principal)) -> dict:
     """Make another member an Owner and step down to Admin."""
     _public_only()
+    _not_personal(workspace_id, _PERSONAL)
     if body.user_id == me.user.id:
         raise HTTPException(400, "you already own this workspace")
     if accounts.role_in(workspace_id, body.user_id) is None:
@@ -117,6 +129,7 @@ def transfer_ownership(workspace_id: str, body: TransferBody,
 @router.post("/workspaces/{workspace_id}/leave", status_code=204)
 def leave_workspace(workspace_id: str, me: Principal = Depends(get_principal)) -> Response:
     _public_only()
+    _not_personal(workspace_id, "you can't leave your personal workspace")
     if me.role_in(workspace_id) == "owner" and accounts.owner_count(workspace_id) == 1:
         raise HTTPException(409, "you're the last Owner: make someone else Owner first")
     accounts.remove_member(workspace_id, me.user.id)
@@ -181,6 +194,7 @@ def list_invites(workspace_id: str, me: Principal = Depends(get_principal)) -> l
 @router.post("/workspaces/{workspace_id}/invites", status_code=201)
 def create_invite(workspace_id: str, body: InviteBody, me: Principal = Depends(get_principal)) -> dict:
     _public_only()
+    _not_personal(workspace_id, _PERSONAL)
     if body.role == "owner" and me.role_in(workspace_id) != "owner":
         raise HTTPException(403, "only an Owner can invite an Owner")
     login = (body.github_login or "").strip() or None

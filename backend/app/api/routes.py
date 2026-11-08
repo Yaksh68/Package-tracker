@@ -65,8 +65,10 @@ def me_route(me: Principal = Depends(get_principal)) -> dict:
 
 @router.delete("/me", status_code=204)
 def delete_account(me: Principal = Depends(get_principal)) -> Response:
-    """Delete the signed-in user, their personal workspace (repos, history,
-    uploads, settings, secrets) and their analytics rows."""
+    """Delete the signed-in user, their personal workspace and any team
+    workspace they're the only member of (repos, history, uploads, settings,
+    secrets), and their analytics rows. Refused while they're the last Owner
+    of a team workspace that has other members."""
     if not get_settings().public_mode():
         raise HTTPException(400, "there are no accounts to delete in the local mode")
     for w in me.workspaces:

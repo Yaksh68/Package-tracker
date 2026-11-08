@@ -223,6 +223,23 @@ def test_the_last_owner_of_a_shared_workspace_cant_delete_their_account(team):
     assert clients["owner"][0].delete("/api/me").status_code == 409
 
 
+def test_a_personal_workspace_stays_personal(public):
+    c, user = _user("loner")
+    personal = accounts.user_workspaces(user.id)[0].id
+    _, friend = _user("friend")
+    assert c.post(f"/api/workspaces/{personal}/invites", json={"role": "viewer"}).status_code == 400
+    assert c.post(f"/api/workspaces/{personal}/transfer", json={"user_id": friend.id}).status_code == 400
+    assert c.post(f"/api/workspaces/{personal}/leave").status_code == 400
+
+
+def test_deleting_an_account_takes_the_team_workspaces_only_they_were_in(public):
+    c, _ = _user("hermit")
+    ws = c.post("/api/workspaces", json={"name": "Team of one"}).json()["id"]
+    storage.upsert_repo(Repo(id="hermit-repo", url="https://github.com/h/r", branches=["main"], workspace_id=ws))
+    assert c.delete("/api/me").status_code == 204
+    assert accounts.get_workspace(ws) is None and storage.get_repo("hermit-repo") is None
+
+
 # --------------------------------------------------------------------------- #
 # invites                                                                       #
 # --------------------------------------------------------------------------- #
@@ -335,6 +352,17 @@ def test_the_platform_admin_manages_users(team):
     assert root_c.put(f"/api/admin/users/{root.id}", json={"status": "disabled"}).status_code == 400
     assert root_c.delete(f"/api/admin/users/{victim.id}").status_code == 204
     assert accounts.get_user(victim.id) is None
+
+
+def test_deleting_the_last_owner_hands_the_workspace_to_the_next_member(team):
+    ws, clients = team
+    root_c, _ = _user("root", admin=True)
+    admin_c, admin = clients["admin"]
+    assert root_c.delete(f"/api/admin/users/{clients['owner'][1].id}").status_code == 204
+    assert accounts.role_in(ws, admin.id) == "owner" and accounts.owner_count(ws) == 1
+    entry = admin_c.get(f"/api/workspaces/{ws}/audit").json()[0]
+    assert entry["action"] == "member.role_change" and entry["target_id"] == admin.id
+    assert entry["details"]["to"] == "owner" and entry["actor"]["kind"] == "platform_admin"
 
 
 def test_viewing_a_workspace_is_metadata_only_and_audited(team):

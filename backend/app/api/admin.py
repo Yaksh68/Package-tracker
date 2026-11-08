@@ -56,7 +56,12 @@ def set_user_status(user_id: str, body: StatusBody, me: Principal = Depends(get_
 @router.delete("/users/{user_id}", status_code=204)
 def delete_user(user_id: str, me: Principal = Depends(get_principal)) -> Response:
     user = _target_user(user_id, me)
-    delete_user_everything(user.id)
+    for p in delete_user_everything(user.id):
+        # shared workspaces they were the last Owner of: recorded where their members can see it
+        audit.record("member.role_change", workspace_id=p["workspace_id"], actor=me,
+                     actor_kind="platform_admin", target_type="user", target_id=p["user_id"],
+                     **{"from": p["from"], "to": "owner",
+                        "reason": "the last Owner's account was deleted"})
     audit.record("admin.user_delete", workspace_id=None, actor=me, actor_kind="platform_admin",
                  target_type="user", target_id=user.id, login=user.login)
     return Response(status_code=204)

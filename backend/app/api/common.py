@@ -33,12 +33,26 @@ def delete_workspace_everything(workspace_id: str) -> None:
     accounts.delete_workspace(workspace_id)
 
 
-def delete_user_everything(user_id: str) -> None:
-    """Delete a user, their personal workspace(s) with everything in them, and
-    their analytics rows. Their memberships elsewhere, sessions and activity
-    days cascade."""
-    personal = accounts.personal_workspace_ids(user_id)
-    _refuse_while_scanning([r for ws in personal for r in storage.load_repos(ws)])
-    for ws in personal:
+def delete_user_everything(user_id: str) -> list[dict]:
+    """Delete a user and everything only they could reach: their personal
+    workspace and any team workspace they're the only member of, with
+    everything in them, plus their analytics rows. Their other memberships,
+    sessions and activity days cascade.
+
+    A team workspace this leaves without an Owner gets one: the remaining
+    member with the highest role. (`DELETE /api/me` refuses that case first,
+    so in practice only a platform admin's deletion gets here.) Returns those
+    promotions as {workspace_id, user_id, from} for the caller to audit."""
+    gone = accounts.personal_workspace_ids(user_id) + accounts.sole_member_team_workspace_ids(user_id)
+    _refuse_while_scanning([r for ws in gone for r in storage.load_repos(ws)])
+    promoted = []
+    for w in accounts.user_workspaces(user_id):
+        if w.id in gone or w.role != "owner" or accounts.owner_count(w.id) > 1:
+            continue
+        if heir := accounts.successor(w.id, user_id):
+            accounts.set_role(w.id, heir["user_id"], "owner")
+            promoted.append({"workspace_id": w.id, "user_id": heir["user_id"], "from": heir["role"]})
+    for ws in gone:
         delete_workspace_everything(ws)
     accounts.delete_user(user_id)
+    return promoted

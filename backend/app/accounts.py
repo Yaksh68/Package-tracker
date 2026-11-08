@@ -426,6 +426,28 @@ def personal_workspace_ids(user_id: str) -> list[str]:
             WorkspaceRow.personal, WorkspaceRow.created_by == user_id)))
 
 
+def sole_member_team_workspace_ids(user_id: str) -> list[str]:
+    """Team workspaces this user is the only member of: nobody else could
+    reach them once the user is gone."""
+    with session() as s:
+        sizes = (select(MembershipRow.workspace_id, func.count().label("n"))
+                 .group_by(MembershipRow.workspace_id).subquery())
+        return list(s.scalars(
+            select(WorkspaceRow.id)
+            .join(MembershipRow, MembershipRow.workspace_id == WorkspaceRow.id)
+            .join(sizes, sizes.c.workspace_id == WorkspaceRow.id)
+            .where(MembershipRow.user_id == user_id, WorkspaceRow.personal.is_(False), sizes.c.n == 1)))
+
+
+def successor(workspace_id: str, leaving_user_id: str) -> dict | None:
+    """Who should become Owner when the last Owner goes: the remaining member
+    with the highest role, the longest-standing one on a tie."""
+    from .rbac import rank  # (rbac imports auth, which imports this module)
+    others = [m for m in workspace_members(workspace_id) if m["user_id"] != leaving_user_id]
+    # workspace_members is oldest first, and max() keeps the first of equals
+    return max(others, key=lambda m: rank(m["role"])) if others else None
+
+
 def delete_workspace(workspace_id: str) -> None:
     """Delete a workspace's own rows: settings, secrets, memberships and
     invites cascade, plus its analytics and audit rows. The caller deletes its
