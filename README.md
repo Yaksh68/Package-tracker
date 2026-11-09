@@ -33,7 +33,20 @@ CLI** as a subprocess, which uses the subscription login already stored in
 
 `agent_backend` (in `.env` / config) selects the transport:
 `subprocess` (default, drives the CLI directly — most robust), `sdk`
-(`claude-agent-sdk`), or `auto` (SDK with subprocess fallback).
+(`claude-agent-sdk`), or `auto` (SDK with subprocess fallback). The SDK is an
+optional extra, since it bundles the whole CLI: `pip install -e ".[claude]"` to use
+`sdk` or `auto`.
+
+## Deploying to the cloud
+
+The public, multi-user service runs from one Docker image (the API serving the
+built UI) behind Caddy, with PostgreSQL, on a single VM:
+`deploy/compose.cloud.yml`, `deploy/Caddyfile`, `deploy/.env.cloud.example`.
+**[docs/DEPLOY-ORACLE.md](docs/DEPLOY-ORACLE.md)** walks through it on Oracle's
+Always Free tier: the VM, both firewalls, the domain, GitHub sign-in, the first
+start, nightly backups copied off the VM (`deploy/backup.sh`), and updates
+(`deploy/update.sh`). CI (`.github/workflows/`) runs the tests on every push and
+builds the image when its inputs change.
 
 ## Run it
 
@@ -74,7 +87,7 @@ cd backend
 python3.11 -m venv .venv --without-pip
 curl -sS https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
 . .venv/bin/activate
-pip install -e .                     # add pytest pytest-asyncio for the tests
+pip install -e ".[dev]"              # the tests' tools too; add ,claude for AGENT_BACKEND=sdk
 # in ../.env also fill in GITLAB_TOKEN / GITHUB_TOKEN
 # the tracker listens on :8001 (the deploy units and VITE_API_TARGET assume it)
 uvicorn app.main:app --reload --port 8001        # http://127.0.0.1:8001
