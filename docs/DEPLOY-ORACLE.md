@@ -205,7 +205,11 @@ certificate.
 2. Add a public repository (e.g. `https://github.com/psf/requests`) and wait for
    its scan. It shows up in your personal workspace.
 3. Look over *Admin → Limits*. The defaults are in the README.
-4. *Admin → Analytics* shows how the service is doing: sign-ups, activity,
+4. Signed-out visitors can try one free scan from the sign-in page. Its limits
+   are in *Admin → Limits* (setting free scans per day to 0 turns them off).
+   Optionally, give free scans' GitHub lookups a token: `TRIAL_GITHUB_TOKEN` in
+   `deploy/.env.cloud`, a token with no permissions (see the example file).
+5. *Admin → Analytics* shows how the service is doing: sign-ups, activity,
    scans, AI use and the server's health. The health charts fill in from the
    first hourly reading.
 

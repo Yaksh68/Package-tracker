@@ -510,6 +510,21 @@ Done 2026-11-08: 405 backend tests pass, 33 of them new in `test_rbac.py`.
 
 ---
 
+### Phase 7: free scans without an account
+Asked for after launch (2026-11-09).
+- **What it does:**
+  - A signed-out visitor scans one repository from the sign-in page, with a token for a private one if needed, and sees the full results.
+  - Signing in with GitHub keeps the repo and its scan in their workspace. Saving, rescanning, history, scheduling, CSV and AI all need an account.
+  - Unsaved free scans are deleted after a day.
+- **Guardrails:**
+  - one free scan per browser, 3 per network a day and 100 a day in all (0 turns them off), all in Admin → Limits;
+  - a queue and worker of their own;
+  - a `git ls-remote` check first;
+  - the visitor's token only in memory;
+  - no AI.
+- **Analytics:** a "Free scans" tile, and a section with what free scans led to, per day, and who was turned away.
+- **As built:** guests are users with status `guest` and a `trial` workspace (migration 0011), limited to the routes that show their scan. See the developer guide.
+
 ## Later (not scheduled)
 - Listing an image's OS packages without Docker, by reading `/var/lib/dpkg/status` from the image's layers through the registry API. Nothing runs, so it's safe in public mode.
 - The AI extraction agent on API providers, using read, glob and grep tools that can only see the cloned repo.
