@@ -13,7 +13,6 @@ dependencies = [
     "httpx>=0.27",
     "apscheduler>=3.10",
     "packaging>=24.0",
-    "claude-agent-sdk>=0.1.0",
     # AI providers with the user's own key (app/ai/)
     "anthropic>=2.0",
     "openai>=1.40",
@@ -27,6 +26,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# AGENT_BACKEND=sdk/auto only (the default, subprocess, runs the `claude`
+# binary directly). It bundles the whole Claude Code CLI, which the cloud
+# image doesn't need: the public mode can't use the CLI.
+claude = ["claude-agent-sdk>=0.1.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
