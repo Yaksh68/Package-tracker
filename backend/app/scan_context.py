@@ -14,6 +14,11 @@ Where credentials come from (first match wins):
                     (local mode only) → none
 The public mode never falls back to the server's own env tokens: users bring
 their own.
+
+A free scan without an account (`trial`) uses only the token the visitor gave
+for that scan, held here in memory and gone when the scan ends, for the repo's
+own host. Its GitHub lookups fall back to TRIAL_GITHUB_TOKEN, if the server
+has one.
 """
 from __future__ import annotations
 
@@ -30,6 +35,11 @@ _MISSING = object()
 class ScanContext:
     workspace_id: str = LOCAL_WORKSPACE_ID
     created_by: str | None = None
+    # a free scan without an account: the visitor's token (never stored) and
+    # the host it's for
+    trial: bool = False
+    trial_token: str | None = field(default=None, repr=False)
+    repo_host: str = ""
     _memo: dict = field(default_factory=dict, repr=False)
 
     def _cached(self, key: str, compute):
@@ -44,6 +54,8 @@ class ScanContext:
 
     def git_token(self, host: str) -> str | None:
         host = (host or "").lower()
+        if self.trial:
+            return self.trial_token if host and host == self.repo_host else None
         name = "github_token" if "github" in host else "gitlab_token" if "gitlab" in host else None
         if name is None:
             return None
@@ -57,6 +69,10 @@ class ScanContext:
 
     def github_api_token(self) -> str | None:
         def compute():
+            if self.trial:
+                if self.trial_token and self.repo_host == "github.com":
+                    return self.trial_token
+                return get_settings().trial_github_token or None
             token = self.secret("github_token")
             if token:
                 return token

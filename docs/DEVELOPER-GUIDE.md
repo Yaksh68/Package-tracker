@@ -98,6 +98,8 @@ packages-tracker/
 │       ├── api/workspaces.py     # REST: workspaces, members, invites, audit log
 │       ├── api/admin.py          # REST: the platform admin
 │       ├── api/analytics.py      # REST: the platform admin's analytics
+│       ├── trial.py              # free scans without an account: start, keep on sign-in, expire
+│       ├── api/trial.py          # REST: POST /api/trial (public, no session)
 │       ├── api/common.py         # deleting a repo, workspace or user with its data
 │       ├── ai/                   # AI providers (Anthropic, OpenAI-compatible), search, pricing
 │       └── agents/
@@ -183,6 +185,7 @@ packages-tracker/
   `workspace_settings`, `secrets` (encrypted), `user_activity_days` and
   `usage_events`. Phase 2b adds `invites` (a GitHub login, or a link's token
   hash) and `audit_events`. `repos.workspace_id` has no foreign key.
+- Phase 7 adds `workspaces.trial`: a free scan's short-lived workspace.
 - Phase 6 adds `system_samples`: an hourly reading of the server's health
   (disk, database size, memory, the scan queue).
 - `position` columns preserve list order exactly as the scan produced it.
@@ -357,6 +360,46 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   delete) and workspaces (list with counts; one workspace's members and repos,
   recorded in that workspace's log as `admin.view_workspace`). No scan results
   or keys.
+
+### `trial.py`, `api/trial.py` (Phase 7): free scans without an account
+- `POST /api/trial` (`{url, branch?, token?}`) is public, like sign-in: no
+  session, not behind `rbac.authorize`.
+- In order, it checks:
+  - free scans are on (`trial_scans_per_day` > 0);
+  - this browser has no free scan yet (a guest cookie gets a 409 with its
+    `repo_id`; a signed-in user gets a 409 too);
+  - the URL and branch rules;
+  - room in the trial queue (`QUEUE_MAX`);
+  - the repo, with `clone.remote_info` (`git ls-remote`, under the same
+    rules as a clone), so a typo or a missing token doesn't use up the scan;
+  - the daily limits: `trial_scans_per_day` (from the `trial_scan` events of
+    the last 24 h) and `trial_scans_per_ip` (an in-memory `SlidingWindow`
+    over a day, so addresses aren't stored).
+- It then creates a guest: a user with status `guest`, no GitHub id, and a
+  `trial` workspace where they're a Viewer. It adds the repo and a session of
+  `trial_hours`, and queues the scan with `scan_queue.enqueue_trial`.
+- The visitor's token rides only on the in-memory `Job`, into the scan's
+  `ScanContext` (`trial_token`). It's used for the repo's own host, and for
+  GitHub lookups on github.com. With no token, the lookups use
+  `TRIAL_GITHUB_TOKEN` if set. It's never stored or logged, and the saved repo
+  doesn't keep it.
+- Guests reach only `rbac.GUEST_ROUTES` (`/api/me`, and their repo, its
+  status, log, snapshots and components); anything else is a 403 that says to
+  sign in. Free scans are never scheduled (`scheduler.sync_repo` skips trial
+  workspaces) and get no AI (a guest has no key).
+- Signing in with a guest cookie runs `claim`: it moves the repo, with its
+  `scan_runs`, into the person's personal workspace, schedules it, deletes
+  the guest and records `trial_saved`.
+- `expire` (hourly job `trial-expire`) deletes guests older than
+  `trial_hours`. Their `scan_runs` stay, without a workspace, so the
+  analytics still count the work.
+- After a restart, `scheduler._requeue_trials` puts back free scans that
+  never ran, without a token: it only lived in memory.
+- The analytics (`trials` panel, "Free scans" tile) count the usage events
+  `trial_scan`, `trial_finished`, `trial_busy` and the trial `limit_hit`s,
+  which carry no user or workspace, so they outlast the guests; plus
+  `trial_saved`. Guests never count as users: not toward the sign-up cap, not
+  in the admin's lists, not in the user numbers.
 
 ### `analytics.py`, `api/analytics.py` (Phase 6)
 - `GET /api/admin/analytics/{panel}?start=&end=` is `PLATFORM_ADMIN`. It
@@ -976,6 +1019,21 @@ cancelling), `test_limits.py` (each limit, overrides, the admin endpoints),
 `test_housekeeping.py` (retention, pausing, resuming), `test_ai_reuse.py`,
 `test_ratelimit.py`, and a concurrency test for the lookups. Frontend:
 `ScanStatusPill.test.ts`.
+
+Phase 7 added:
+- `test_trial.py` covers:
+  - one free scan per browser, which a guest can only look at;
+  - the token reaching that scan only, and never stored;
+  - a typo or missing branch not using up the scan;
+  - the limits per network and per day, and the off switch;
+  - a busy queue;
+  - signing in keeping the scan;
+  - expiry;
+  - guests not counting as users, and never being scheduled;
+  - the trial `ScanContext`;
+  - the analytics.
+- Frontend: `App.test.tsx` runs a free scan from the sign-in page to its
+  results.
 
 Phase 6 added:
 - `test_analytics.py`: who can see the analytics, each panel against seeded

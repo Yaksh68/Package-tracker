@@ -140,14 +140,30 @@ ROUTE_PERMS: dict[tuple[str, str], Perm | str] = {
 }
 
 
+# A guest (a free scan without an account, trial.py) may only look at their
+# scan. Everything else, including what a Viewer could do, needs signing in.
+GUEST_ROUTES: frozenset[tuple[str, str]] = frozenset({
+    ("GET", "/api/me"),
+    ("GET", "/api/repos"),
+    ("GET", _R),
+    ("GET", f"{_R}/scan-status"),
+    ("GET", f"{_R}/scan-log"),
+    ("GET", f"{_R}/snapshots"),
+    ("GET", f"{_R}/snapshots/{{ts}}/components"),
+})
+
+
 def authorize(request: Request, me: Principal = Depends(get_principal)) -> None:
     """Router dependency: allow the request only if the caller has the
     permission its route needs, in the workspace the route is about."""
     route = request.scope.get("route")
     method = "GET" if request.method == "HEAD" else request.method
-    need = ROUTE_PERMS.get((method, getattr(route, "path", "")))
+    key = (method, getattr(route, "path", ""))
+    need = ROUTE_PERMS.get(key)
     if need is None:  # fail closed: an undeclared route is a bug, not an open door
         raise HTTPException(500, "this route has no declared permission")
+    if me.user.status == "guest" and key not in GUEST_ROUTES:
+        raise HTTPException(403, "Sign in with GitHub to do this. Your free scan comes with you.")
     if need == SIGNED_IN:
         return
     if need == PLATFORM_ADMIN:

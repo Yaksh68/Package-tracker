@@ -17,6 +17,7 @@ planned release**. Each scan is saved as a timestamped snapshot so you can see
 - **Two modes**: `AUTH_MODE=none` (default) is a single local user. `AUTH_MODE=github`
   is the public multi-user service: Sign in with GitHub, team workspaces with
   roles, invites, an audit log and a platform admin area with analytics.
+  Visitors can try one free scan without an account; signing in keeps it.
 
 ## How the AI auth works (important)
 
@@ -141,6 +142,7 @@ branch, planned release date, and interval. The first scan starts immediately.
 | `IMAGE_INSPECT` | Docker image inventory: `auto` (default: use Docker when it's there, otherwise skip without degrading the scan), `on`, or `off`. Always off in the public mode |
 | `GITLAB_TOKEN` / `GITHUB_TOKEN` | Repo read PATs; injected into the clone URL at runtime, never stored in snapshots or logs |
 | `GITHUB_API_TOKEN` | Optional; raises GitHub API rate limit for enrichment (falls back to `GITHUB_TOKEN`) |
+| `TRIAL_GITHUB_TOKEN` | Public mode, optional: GitHub lookups during free scans without an account, when the visitor gives no token. A token with no permissions is enough; it lifts GitHub's limit from 60 lookups an hour for the whole server to 5,000 |
 | `CLAUDE_CLI_PATH` | Path to the `claude` binary if not on PATH |
 | `AI_PROVIDER` | Who researches ambiguous packages. Unset = the Claude CLI and its login (local mode only); `anthropic` = Anthropic API; `openai`, `gemini`, `groq`, `openrouter` = that provider's OpenAI-compatible API; `openai-compatible` = any other OpenAI-compatible endpoint at `AI_BASE_URL` |
 | `AI_MODEL` | Model for `AI_PROVIDER` (Anthropic default `claude-haiku-5-5`; required for the OpenAI-compatible ones) |
@@ -245,7 +247,8 @@ to run against Postgres (tables are truncated between tests — use a scratch DB
 | GET | `/api/admin/workspaces`, `/api/admin/workspaces/{id}` | platform admin: every workspace with member and repo counts; one workspace's members and repos (metadata only, and recorded in that workspace's audit log) |
 | GET/PUT | `/api/admin/limits` | platform admin: the limits every workspace gets |
 | GET/PUT | `/api/admin/workspaces/{id}/limits` | platform admin: one workspace's own limits (`null` = the platform's value), with its usage. Recorded in that workspace's audit log |
-| GET | `/api/admin/analytics/{panel}?start=&end=` | platform admin: one analytics panel (`overview`, `growth`, `activation`, `retention`, `scans`, `content`, `ai`, `system`, `workspaces`) for a range of UTC days, the last 30 by default. Totals and metadata only |
+| GET | `/api/admin/analytics/{panel}?start=&end=` | platform admin: one analytics panel (`overview`, `growth`, `activation`, `retention`, `scans`, `content`, `ai`, `system`, `workspaces`, `trials`) for a range of UTC days, the last 30 by default. Totals and metadata only |
+| POST | `/api/trial` | public mode, no sign-in: a free scan of one repo (`{url, branch?, token?}`; the token is for a private repo, used for that scan only and never stored). Starts a guest session that can only look at that scan; signing in with GitHub moves it into your workspace. One per browser, limited per network and per day |
 | GET | `/api/info` | open to anyone: the mode, and the operator's name and contact |
 | GET | `/api/auth/github/login?next=/page`, `/api/auth/github/callback` | Sign in with GitHub (public mode), returning to `next` (a path on this site). A failed sign-in lands on `/login?error=` `cancelled`, `expired`, `github`, `disabled` or `full` |
 | POST | `/api/auth/logout` | end the session |
@@ -278,8 +281,11 @@ The platform admin sets these for everyone (Admin, then Limits) and can give a w
 | Zip size, packed / unpacked | 50 MB / 500 MB |
 | Upload storage per workspace | 200 MB |
 | Scans kept per branch | 30 (older ones are deleted daily) |
+| Free scans without an account, per day | 100 (0 turns them off) |
+| Free scans per network (IP address) per day | 3 (counted in memory; addresses aren't stored) |
+| Hours a free scan is kept unless saved | 24 |
 
-Scans wait in a queue: `SCAN_WORKERS` run at once, one per workspace, and workspaces take turns. When nobody in a workspace has used the service for 30 days, its scheduled scans pause until a member comes back. The local mode has no limits, pausing or deletion of history.
+Scans wait in a queue: `SCAN_WORKERS` run at once, one per workspace, and workspaces take turns. Free scans have a queue and a worker of their own, so they never hold up signed-in users' scans. When nobody in a workspace has used the service for 30 days, its scheduled scans pause until a member comes back. The local mode has no limits, pausing or deletion of history.
 
 ## Milestone status
 - **M0 skeleton — done**: storage/config/models, flag engine, deterministic

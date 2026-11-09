@@ -126,6 +126,9 @@ function UsersTab() {
   );
 }
 
+// limits where 0 means "off" (free scans without an account)
+const MAY_BE_ZERO = new Set(["trial_scans_per_day"]);
+
 /** The limits every workspace gets unless it has its own. */
 function LimitsTab() {
   const qc = useQueryClient();
@@ -162,8 +165,8 @@ function LimitsTab() {
         {Object.keys(defaults).map((name) => (
           <Form.Item key={name} label={labels[name]} style={{ marginBottom: 12 }}
             extra={values[name] !== defaults[name] ? `Default: ${defaults[name]}` : undefined}>
-            <InputNumber min={1} max={100000} precision={0} value={values[name]} style={{ width: 140 }}
-              onChange={(v) => setValues((old) => ({ ...old, [name]: v ?? defaults[name] }))} />
+            <InputNumber min={MAY_BE_ZERO.has(name) ? 0 : 1} max={100000} precision={0} value={values[name]}
+              style={{ width: 140 }} onChange={(v) => setValues((old) => ({ ...old, [name]: v ?? defaults[name] }))} />
           </Form.Item>
         ))}
         <Button type="primary" onClick={() => save.mutate()} loading={save.isPending}>Save</Button>

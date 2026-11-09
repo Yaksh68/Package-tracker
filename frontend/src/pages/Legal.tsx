@@ -93,6 +93,15 @@ export function PrivacyPage() {
         </li>
       </ul>
 
+      <Title level={4}>Free scans without an account</Title>
+      <Paragraph>
+        You can scan one repository without signing in. We keep its address, the scan's results and a cookie that
+        lets your browser see them, for a day. If you sign in with GitHub in that time, the repository and its results
+        move into your account; otherwise they're deleted. A token you give for a private repository is used for that
+        one scan and never stored. To limit free scans per network, we count them by IP address in the server's
+        memory, for a day; IP addresses are never written down.
+      </Paragraph>
+
       <Title level={4}>Who else sees it</Title>
       <ul>
         <li>
@@ -122,8 +131,8 @@ export function PrivacyPage() {
 
       <Title level={4}>Cookies and browser storage</Title>
       <Paragraph>
-        One cookie keeps you signed in, and two short-lived ones protect the sign-in itself. The browser also remembers
-        your light or dark theme and which workspace you last used.
+        One cookie keeps you signed in (or, for a free scan, lets you see it), and two short-lived ones protect the
+        sign-in itself. The browser also remembers your light or dark theme and which workspace you last used.
       </Paragraph>
 
       <Title level={4}>How long we keep it, and deleting it</Title>

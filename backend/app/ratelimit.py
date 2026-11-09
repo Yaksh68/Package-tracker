@@ -28,9 +28,11 @@ WINDOW = 60.0  # seconds
 
 
 class SlidingWindow:
-    """At most `limit` hits per key in any WINDOW seconds."""
+    """At most `limit` hits per key in any `window` seconds (WINDOW unless
+    given)."""
 
-    def __init__(self) -> None:
+    def __init__(self, window: float = WINDOW) -> None:
+        self.window = window
         self._hits: dict[str, deque[float]] = {}
         self._calls = 0
 
@@ -39,10 +41,10 @@ class SlidingWindow:
         it would be."""
         now = time.monotonic()
         q = self._hits.setdefault(key, deque())
-        while q and q[0] <= now - WINDOW:
+        while q and q[0] <= now - self.window:
             q.popleft()
         if len(q) >= limit:
-            return max(1, int(q[0] + WINDOW - now) + 1)
+            return max(1, int(q[0] + self.window - now) + 1)
         q.append(now)
         self._calls += 1
         if self._calls % 1000 == 0:
@@ -51,7 +53,7 @@ class SlidingWindow:
 
     def _forget(self, now: float) -> None:
         """Drop keys idle for a whole window, so memory stays small."""
-        for key in [k for k, q in self._hits.items() if not q or q[-1] <= now - WINDOW]:
+        for key in [k for k, q in self._hits.items() if not q or q[-1] <= now - self.window]:
             del self._hits[key]
 
 

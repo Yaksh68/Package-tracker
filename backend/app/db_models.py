@@ -226,6 +226,9 @@ class WorkspaceRow(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     # every user gets one personal workspace; team workspaces arrive in 2b
     personal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # a free scan's workspace (phase 7): a guest's, deleted unless they sign in
+    trial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
+                                        server_default=text("false"))
     created_by: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

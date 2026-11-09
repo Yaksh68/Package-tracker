@@ -1,4 +1,5 @@
 import type {
+  TrialStarted,
   AnalyticsPanels,
   AdminUser,
   AdminWorkspace,
@@ -36,11 +37,14 @@ import type {
 export class ApiError extends Error {
   status: number;
   detail: unknown;
-  constructor(status: number, message: string, detail?: unknown) {
+  /** The whole JSON answer, for errors that carry more than a message. */
+  body: unknown;
+  constructor(status: number, message: string, detail?: unknown, body?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.body = body;
   }
 }
 
@@ -62,16 +66,18 @@ function detailMessage(detail: unknown): string | null {
 
 export async function parseError(res: Response): Promise<ApiError> {
   const text = await res.text().catch(() => "");
+  let body: unknown = undefined;
   let detail: unknown = undefined;
   try {
-    detail = text ? (JSON.parse(text) as { detail?: unknown }).detail : undefined;
+    body = text ? JSON.parse(text) : undefined;
+    detail = (body as { detail?: unknown } | undefined)?.detail;
   } catch {
     /* not JSON */
   }
   const msg =
     detailMessage(detail) ??
     (res.status >= 500 ? `Server error (${res.status})` : res.statusText || `Request failed (${res.status})`);
-  return new ApiError(res.status, msg, detail);
+  return new ApiError(res.status, msg, detail, body);
 }
 
 /** Sent on every request. In the public mode the backend refuses data-changing
@@ -161,6 +167,9 @@ export const api = {
   // ---- the service and the signed-in account ----
   info: () => req<ServiceInfo>("/api/info"),
   me: () => req<Me>("/api/me"),
+  /** A free scan without an account (the token is for a private repo, that scan only). */
+  startTrial: (body: { url: string; branch?: string; token?: string }) =>
+    req<TrialStarted>("/api/trial", { method: "POST", ...json(body) }),
   deleteAccount: () => req<void>("/api/me", { method: "DELETE" }),
   logout: () => req<void>("/api/auth/logout", { method: "POST" }),
   /** Where the "Sign in with GitHub" button goes; `next` is where to land after. */

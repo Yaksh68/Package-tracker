@@ -157,20 +157,21 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def create_session(user_id: str, user_agent: str | None = None) -> str:
-    """Start a session and return the token for the cookie. Only its hash is stored."""
+def create_session(user_id: str, user_agent: str | None = None, *, hours: int | None = None) -> str:
+    """Start a session and return the token for the cookie. Only its hash is
+    stored. It lasts SESSION_DAYS, or `hours` (a guest's)."""
     token = _secrets.token_urlsafe(32)
     now = _now()
+    life = timedelta(hours=hours) if hours else timedelta(days=get_settings().session_days)
     with session() as s:
-        s.add(SessionRow(id=_hash(token), user_id=user_id, created_at=now,
-                         expires_at=now + timedelta(days=get_settings().session_days),
+        s.add(SessionRow(id=_hash(token), user_id=user_id, created_at=now, expires_at=now + life,
                          last_used_at=now, user_agent=(user_agent or "")[:300] or None))
     return token
 
 
 def user_for_session(token: str | None) -> User | None:
-    """The active user behind a session token, or None (unknown, expired, or
-    the user is disabled)."""
+    """The user behind a session token (active, or a guest with a free scan),
+    or None (unknown, expired, or the user is disabled)."""
     if not token:
         return None
     now = _now()
@@ -182,7 +183,7 @@ def user_for_session(token: str | None) -> User | None:
             s.delete(row)
             return None
         user = s.get(UserRow, row.user_id)
-        if user is None or user.status != "active":
+        if user is None or user.status not in ("active", "guest"):
             return None
         if row.last_used_at is None or now - _utc(row.last_used_at) > _SESSION_TOUCH:
             row.last_used_at = now
@@ -300,11 +301,13 @@ def all_users() -> list[dict]:
 
 
 def all_workspaces() -> list[dict]:
-    """Every workspace with its member count, for the platform admin."""
+    """Every workspace with its member count, for the platform admin. Free
+    scans' short-lived workspaces aren't listed (the analytics count them)."""
     with session() as s:
         counts = dict(s.execute(select(MembershipRow.workspace_id, func.count())
                                 .group_by(MembershipRow.workspace_id)).all())
-        rows = s.scalars(select(WorkspaceRow).order_by(WorkspaceRow.created_at.desc())).all()
+        rows = s.scalars(select(WorkspaceRow).where(WorkspaceRow.trial.is_(False))
+                         .order_by(WorkspaceRow.created_at.desc())).all()
         return [{"id": w.id, "name": w.name, "personal": w.personal, "created_by": w.created_by,
                  "created_at": _utc(w.created_at).isoformat(), "members": counts.get(w.id, 0)}
                 for w in rows]
@@ -436,6 +439,45 @@ def personal_workspace_ids(user_id: str) -> list[str]:
     with session() as s:
         return list(s.scalars(select(WorkspaceRow.id).where(
             WorkspaceRow.personal, WorkspaceRow.created_by == user_id)))
+
+
+# --------------------------------------------------------------------------- #
+# Guests: free scans without an account (phase 7, trial.py)                     #
+# --------------------------------------------------------------------------- #
+def create_guest() -> tuple[User, str]:
+    """A guest user with a trial workspace of their own, where they're a
+    Viewer: they can look at their scan and nothing else. Returns (user,
+    workspace id)."""
+    now = _now()
+    with session() as s:
+        row = UserRow(id=uuid.uuid4().hex, github_id=None, login="guest", status="guest",
+                      platform_role="user", created_at=now)
+        s.add(row)
+        s.flush()
+        ws = WorkspaceRow(id=uuid.uuid4().hex, name="Free scan", personal=True, trial=True,
+                          created_by=row.id, created_at=now)
+        s.add(ws)
+        s.flush()
+        s.add(MembershipRow(workspace_id=ws.id, user_id=row.id, role="viewer", created_at=now))
+        return _user(row), ws.id
+
+
+def trial_workspace_ids() -> set[str]:
+    with session() as s:
+        return set(s.scalars(select(WorkspaceRow.id).where(WorkspaceRow.trial.is_(True))))
+
+
+def is_trial_workspace(workspace_id: str | None) -> bool:
+    if not workspace_id:
+        return False
+    with session() as s:
+        return bool(s.scalar(select(WorkspaceRow.trial).where(WorkspaceRow.id == workspace_id)))
+
+
+def guests_created_before(when: datetime) -> list[str]:
+    with session() as s:
+        return list(s.scalars(select(UserRow.id).where(UserRow.status == "guest",
+                                                        UserRow.created_at < when)))
 
 
 def sole_member_team_workspace_ids(user_id: str) -> list[str]:

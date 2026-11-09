@@ -9,8 +9,8 @@ import { fmtDate, fmtRelative } from "../format";
 import { ROLE_LABEL } from "../lib/permissions";
 import { useDrawerWidth } from "../lib/responsive";
 
-// per-user, so a workspace can't override it
-const NOT_PER_WORKSPACE = new Set(["workspaces_per_user"]);
+// per user, or about free scans without an account: a workspace can't override them
+const NOT_PER_WORKSPACE = new Set(["workspaces_per_user", "trial_scans_per_day", "trial_scans_per_ip", "trial_hours"]);
 const METERED = new Set(["repos_per_workspace", "members_per_workspace", "upload_storage_mb", "manual_scans_per_hour"]);
 
 /** One workspace's own limits. Blank = the platform's value. */

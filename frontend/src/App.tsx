@@ -1,10 +1,11 @@
-import { MenuOutlined, MoonOutlined, SunOutlined } from "@ant-design/icons";
+import { GithubOutlined, MenuOutlined, MoonOutlined, SunOutlined } from "@ant-design/icons";
 import { Button, Drawer, Layout, Menu, Result, Tooltip, theme } from "antd";
 import { useEffect, useState } from "react";
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Brand } from "./components/Brand";
 import { useIsMobile } from "./lib/responsive";
 import { AccountMenu, InvitesBell, WorkspaceSwitcher } from "./components/HeaderControls";
+import { TrialBanner, useSignInHere } from "./components/TrialBanner";
 import { AdminPage } from "./pages/Admin";
 import { AuditPage } from "./pages/Audit";
 import { InvitePage } from "./pages/Invite";
@@ -30,10 +31,11 @@ function ThemeToggle() {
 }
 
 function Nav({ mode = "horizontal" }: { mode?: "horizontal" | "inline" }) {
-  const { isPublic, isPlatformAdmin, can } = useSession();
+  const { isPublic, isPlatformAdmin, isGuest, can } = useSession();
   const navigate = useNavigate();
   const { pathname } = useLocation();
-  const items = [
+  // a free scan without an account: only its repository
+  const items = isGuest ? [{ key: "/", label: "Repositories" }] : [
     { key: "/", label: "Repositories" },
     { key: "/settings", label: "Settings" },
     ...(isPublic ? [{ key: "/members", label: "Members" }] : []),
@@ -58,7 +60,10 @@ function Nav({ mode = "horizontal" }: { mode?: "horizontal" | "inline" }) {
 
 function Shell() {
   const { token } = theme.useToken();
-  const { isPublic } = useSession();
+  const { isPublic: publicMode, isGuest } = useSession();
+  // a guest has no account controls: no workspaces, invites or account menu
+  const isPublic = publicMode && !isGuest;
+  const signIn = useSignInHere();
   const mobile = useIsMobile();
   const location = useLocation();
   // On a phone the menu and the workspace switcher live in a drawer, which
@@ -90,6 +95,11 @@ function Shell() {
           {isPublic && <InvitesBell />}
           <ThemeToggle />
           {isPublic && <AccountMenu />}
+          {isGuest && (
+            <Button type="primary" icon={<GithubOutlined />} href={signIn} size={mobile ? "small" : "middle"}>
+              Sign in
+            </Button>
+          )}
         </div>
       </Layout.Header>
       {mobile && (
@@ -110,6 +120,7 @@ function Shell() {
         </Drawer>
       )}
       <Layout.Content style={{ padding: mobile ? 12 : 24, maxWidth: 1400, margin: "0 auto", width: "100%" }}>
+        <TrialBanner />
         <Routes>
           <Route path="/" element={<RepoList />} />
           <Route path="/repos/:id" element={<RepoDetail />} />

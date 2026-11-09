@@ -76,6 +76,46 @@ def _redact(text: str, *secrets: str | None) -> str:
     return out
 
 
+@dataclass
+class RemoteInfo:
+    default_branch: str | None
+    branches: set[str]
+
+
+_LS_REMOTE_TIMEOUT = 30
+
+
+def remote_info(url: str, token: str | None = None) -> RemoteInfo:
+    """Read a repo's branches and default branch with `git ls-remote`, without
+    cloning (a free scan checks the repo before using up the visitor's scan).
+    The same rules as a clone; CloneError when the repo can't be read."""
+    public = get_settings().public_mode()
+    try:
+        url = check_repo_url(url)
+        if public:
+            require_public_address((urlsplit(url).hostname or "").lower())
+    except RepoUrlError as e:
+        raise CloneError(f"refused: {e}") from e
+    auth_url = _auth_url(url, token)
+    cmd = ["git"] + (["-c", "http.followRedirects=false"] if public else [])
+    cmd += ["ls-remote", "--symref", "--", auth_url, "HEAD", "refs/heads/*"]
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "https" if public else "http:https"}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=_LS_REMOTE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise CloneError(f"{url} didn't answer within {_LS_REMOTE_TIMEOUT}s") from None
+    if proc.returncode != 0:
+        raise CloneError(_redact(proc.stderr.strip() or "git ls-remote failed", token, auth_url))
+    default, branches = None, set()
+    for line in proc.stdout.splitlines():
+        head, _, ref = line.partition("\t")
+        if head.startswith("ref: refs/heads/") and ref == "HEAD":
+            default = head[len("ref: refs/heads/"):]
+        elif ref.startswith("refs/heads/"):
+            branches.add(ref[len("refs/heads/"):])
+    return RemoteInfo(default_branch=default, branches=branches)
+
+
 def shallow_clone(url: str, branch: str, token_override: str | None = None) -> Clone:
     """`git clone --depth 1 --branch <branch>` into a temp dir. Caller cleans up
     (use as a context manager)."""

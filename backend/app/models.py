@@ -477,7 +477,8 @@ class User(BaseModel):
     name: str | None = None
     avatar_url: str | None = None
     platform_role: Literal["user", "admin"] = "user"
-    status: Literal["active", "disabled"] = "active"
+    # "guest": a visitor's free scan without an account (trial.py)
+    status: Literal["active", "disabled", "guest"] = "active"
     created_at: datetime | None = None
     last_seen_at: datetime | None = None
 

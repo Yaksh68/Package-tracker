@@ -21,6 +21,8 @@ export interface Session {
   /** The public mode: GitHub sign-in, team workspaces, members. */
   isPublic: boolean;
   isPlatformAdmin: boolean;
+  /** A visitor's free scan without an account: they can only look at it. */
+  isGuest: boolean;
   /** The active workspace. */
   workspace: Workspace | undefined;
   /** May the user do this, in the active workspace or in `workspaceId`? */
@@ -32,6 +34,9 @@ export interface Session {
 }
 
 const Ctx = createContext<Session | null>(null);
+
+/** Why a guest (a free scan) can't use a control. */
+export const GUEST_WHY = "Sign in with GitHub to do this. Your free scan comes with you.";
 
 export function useSession(): Session {
   const s = useContext(Ctx);
@@ -106,13 +111,17 @@ export function SessionGate({ children }: { children: ReactNode }) {
   const me = meQuery.data;
   const session = useMemo<Session | null>(() => {
     if (!me) return null;
+    const isGuest = !!me.guest;
     return {
       me,
       isPublic: me.mode === "github",
       isPlatformAdmin: me.user.platform_role === "admin",
+      isGuest,
       workspace: me.workspaces.find((w) => w.id === me.workspace_id),
-      can: (perm, ws) => can(me.role_permissions, roleIn(me, ws), perm),
-      why: (perm, ws) => needsRole(me.role_permissions, roleIn(me, ws), perm),
+      can: (perm, ws) => !isGuest && can(me.role_permissions, roleIn(me, ws), perm),
+      why: (perm, ws) => (isGuest && perm !== "view"
+        ? GUEST_WHY
+        : needsRole(me.role_permissions, roleIn(me, ws), perm)),
       switchWorkspace,
       signOut,
     };

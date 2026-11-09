@@ -12,6 +12,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from . import flags, limits, scan_context, scanlog, settings_store, storage, uploads
 from .agents import apt_index, enrichment_agent, extraction_agent, image_inspect, source_apis
@@ -127,10 +128,13 @@ async def run_scan(
     use_extraction_agent: bool | None = None,
     trigger: str = "manual",
     queued_at: datetime | None = None,
+    trial_token: str | None = None,
 ) -> ScanStatus:
     """Scan one branch. `trigger` says why it ran: scheduled, manual, initial
-    (first scan after the repo was added) or upload. `queued_at`: when it
-    joined the scan queue, if it waited in one."""
+    (first scan after the repo was added), upload, or trial (a free scan
+    without an account). `queued_at`: when it joined the scan queue, if it
+    waited in one. `trial_token`: the visitor's token for a trial, used for
+    this scan only."""
     lock = _lock(repo.id, branch)
     if lock.locked():
         return get_status(repo.id, branch)  # overlap guard: skip if already running
@@ -139,7 +143,9 @@ async def run_scan(
         # everything below runs for the repo's workspace: its settings, AI
         # provider and tokens (see scan_context)
         scan_context.bind(scan_context.ScanContext(
-            workspace_id=repo.workspace_id, created_by=repo.created_by))
+            workspace_id=repo.workspace_id, created_by=repo.created_by,
+            trial=trigger == "trial", trial_token=trial_token,
+            repo_host=(urlsplit(repo.url).hostname or "").lower()))
         settings = get_settings()
         use_agent = (
             settings.use_extraction_agent
@@ -493,6 +499,11 @@ def _record_run(
                          else None),
             upstream_errors=dict(upstream_errors),
         ))
+        if trigger == "trial":
+            # kept apart from the trial's workspace, which goes unless the
+            # visitor signs in (the analytics count trials from these events)
+            from . import accounts
+            accounts.record_event("trial_finished", outcome=outcome, packages=len(packages))
     except Exception:  # noqa: BLE001 - analytics must never break a scan
         logging.getLogger("packages-tracker.pipeline").exception(
             "could not record the scan run for %s @ %s", repo.id, branch)
