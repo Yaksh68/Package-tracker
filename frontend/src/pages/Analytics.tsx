@@ -45,6 +45,13 @@ const TRIGGER: Record<string, string> = {
   manual: "Scan now",
   initial: "First scan",
   upload: "Zip upload",
+  trial: "Free scan (no account)",
+};
+
+const TRIAL_REFUSED: Record<string, string> = {
+  trial_scans_per_ip: "A network's daily limit",
+  trial_scans_per_day: "The daily limit for everyone",
+  busy: "The free-scan queue was full",
 };
 
 function usePanel<K extends keyof AnalyticsPanels>(panel: K, range: DayRange, refetchInterval?: number) {
@@ -97,6 +104,7 @@ export default function AnalyticsPage() {
   const ai = usePanel("ai", range);
   const system = usePanel("system", range, 60_000);
   const workspaces = usePanel("workspaces", range);
+  const trials = usePanel("trials", range);
   const csv = (name: string) => `packages-tracker-${name}-${range.start}-to-${range.end}.csv`;
   const today = lastDays(1).end;
 
@@ -224,6 +232,56 @@ export default function AnalyticsPage() {
           </Half>
         </Row>
       </Section>
+
+      <Loaded q={trials}>
+        {(d, dimmed) => {
+          const t = d.totals;
+          const pctOf = (n: number) => (t.started ? Math.round((1000 * n) / t.started) / 10 : null);
+          const steps = [
+            { label: "Started", value: t.started },
+            { label: "Got results", value: t.results },
+            { label: "Scan failed", value: t.failed, color: STATUS.critical },
+            { label: "Kept by signing in", value: t.saved },
+          ];
+          return (
+            <Section title="Free scans (no account)" help={
+              `${fmtCount(t.started)} free scans started in this range, and ${fmtCount(t.saved)} `
+              + `(${fmtPct(t.saved_pct)}) were kept by signing in with GitHub.`
+            }>
+              <Row gutter={[16, 16]}>
+                <Half>
+                  <ChartCard title="What free scans led to" csvName={csv("free-scans")} dimmed={dimmed}
+                    rows={t.started ? steps : []} emptyText="No free scans in this range"
+                    columns={[{ key: "label", title: "Step" }, { key: "value", title: "Free scans" },
+                      { key: "pct", title: "% of those started", value: (s) => pctOf(s.value) ?? "" }]}>
+                    <HBars name="Free scans" rows={steps}
+                      valueLabel={(r) => `${fmtCount(r.value)} · ${fmtPct(pctOf(r.value))}`} />
+                  </ChartCard>
+                </Half>
+                <Half>
+                  <ChartCard title="Free scans per day" csvName={csv("free-scans-per-day")} dimmed={dimmed}
+                    rows={t.started ? d.days : []} emptyText="No free scans in this range"
+                    columns={[dayColumn(), { key: "started", title: "Started" },
+                      { key: "saved", title: "Kept by signing in" }]}>
+                    <DayBars data={d.days} stacked={false}
+                      series={[{ key: "started", name: "Started" }, { key: "saved", name: "Kept by signing in" }]} />
+                  </ChartCard>
+                </Half>
+                <Half>
+                  <ChartCard title="Turned away" csvName={csv("free-scans-refused")} dimmed={dimmed}
+                    rows={d.refused} emptyText="Nobody was turned away in this range"
+                    help="Free scans refused by a limit, or because too many were waiting."
+                    columns={[{ key: "reason", title: "Why", value: (r) => TRIAL_REFUSED[r.reason] ?? r.reason },
+                      { key: "count", title: "Visitors" }]}>
+                    <HBars name="Visitors" labelWidth={200}
+                      rows={d.refused.map((r) => ({ label: TRIAL_REFUSED[r.reason] ?? r.reason, value: r.count }))} />
+                  </ChartCard>
+                </Half>
+              </Row>
+            </Section>
+          );
+        }}
+      </Loaded>
 
       <Loaded q={scans}>
         {(d, dimmed) => (

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, errorMessage, isNotFound } from "../api";
 import { fmtDate, fmtDateTime, fmtRelative, repoName } from "../format";
-import { useSession } from "../session";
+import { GUEST_WHY, useSession } from "../session";
 import { AiStatusTag } from "../components/AiStatusTag";
 import { CitationsDrawer } from "../components/CitationsDrawer";
 import { ComponentTable } from "../components/ComponentTable";
@@ -20,7 +20,7 @@ export function RepoDetail() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const { message } = App.useApp();
-  const { me, can, why, isPublic } = useSession();
+  const { me, can, why, isPublic, isGuest } = useSession();
   // a snapshot the user picked; otherwise the page follows the latest one
   const [pinnedTs, setPinnedTs] = useState<string>();
   const [selected, setSelected] = useState<Component | null>(null);
@@ -159,9 +159,11 @@ export function RepoDetail() {
             value={ts}
             onChange={(v) => setPinnedTs(v === snapshots[0]?.ts ? undefined : v)}
           />
-          {ts && branch && (
+          {ts && branch && (isGuest ? (
+            <Tooltip title={GUEST_WHY}><Button disabled>Download CSV</Button></Tooltip>
+          ) : (
             <Button href={api.reportCsvUrl(id, branch, ts)} download>Download CSV</Button>
-          )}
+          ))}
           <Tooltip title={why("scan", repo.workspace_id)}>
             <Button
               type="primary"

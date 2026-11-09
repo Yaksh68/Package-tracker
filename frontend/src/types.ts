@@ -202,7 +202,8 @@ export interface User {
   name: string | null;
   avatar_url: string | null;
   platform_role: "user" | "admin";
-  status: "active" | "disabled";
+  /** "guest": a visitor's free scan without an account */
+  status: "active" | "disabled" | "guest";
   created_at: string | null;
   last_seen_at: string | null;
 }
@@ -228,6 +229,23 @@ export interface Me {
   workspaces: Workspace[];
   /** Scheduled scans paused for inactivity: now (resumed_at null) or until recently. */
   scans_paused?: { paused_at: string; resumed_at: string | null } | null;
+  /** A visitor's free scan without an account: they can only look at it. */
+  guest?: boolean;
+  trial?: TrialInfo | null;
+}
+
+/** A guest's free scan, and when it's deleted unless they sign in. */
+export interface TrialInfo {
+  repo_id: string | null;
+  branch: string | null;
+  expires_at: string;
+}
+
+/** POST /api/trial: a free scan started; a guest session cookie comes with it. */
+export interface TrialStarted {
+  repo_id: string;
+  branch: string;
+  hours: number;
 }
 
 /** GET /api/info: what anyone may know, signed in or not. */
@@ -556,7 +574,14 @@ export interface AnalyticsWorkspaces extends AnalyticsPanel {
   workspaces: AnalyticsWorkspace[];
 }
 
+export interface AnalyticsTrials extends AnalyticsPanel {
+  totals: { started: number; results: number; failed: number; saved: number; saved_pct: number | null };
+  days: { day: string; started: number; saved: number }[];
+  refused: { reason: string; count: number }[];
+}
+
 export interface AnalyticsPanels {
+  trials: AnalyticsTrials;
   overview: AnalyticsOverview;
   growth: AnalyticsGrowth;
   activation: AnalyticsActivation;
