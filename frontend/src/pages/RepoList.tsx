@@ -74,7 +74,11 @@ function BranchRow({ repoId, info }: { repoId: string; info: BranchInfo }) {
             </Tooltip>
           )}
         </Space>
-        <FlagCounts counts={info.flag_counts} empty={isActive(info.scan_state) ? "first scan running" : "no scan yet"} />
+        <FlagCounts
+          counts={info.flag_counts}
+          empty={info.scan_state === "queued" ? "first scan queued"
+            : info.scan_state === "running" ? "first scan running" : "no scan yet"}
+        />
         <Typography.Text type="secondary" style={{ fontSize: 13 }}>
           <Tooltip title={`Last scan: ${fmtDateTime(info.last_scan)}`}>
             <span>Scanned {info.last_scan ? fmtRelative(info.last_scan) : "never"}</span>
