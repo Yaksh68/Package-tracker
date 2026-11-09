@@ -1,4 +1,5 @@
 import type {
+  AnalyticsPanels,
   AdminUser,
   AdminWorkspace,
   AdminWorkspaceDetail,
@@ -220,6 +221,8 @@ export const api = {
   setAdminLimits: (values: LimitValues) =>
     req<PlatformLimits>("/api/admin/limits", { method: "PUT", ...json(values) }),
   adminWorkspaceLimits: (id: string) => req<AdminWorkspaceLimits>(`/api/admin/workspaces/${enc(id)}/limits`),
+  adminAnalytics: <K extends keyof AnalyticsPanels>(panel: K, range: { start: string; end: string }) =>
+    req<AnalyticsPanels[K]>(`/api/admin/analytics/${panel}?start=${enc(range.start)}&end=${enc(range.end)}`),
   /** null puts a limit back to the platform's value. */
   setAdminWorkspaceLimits: (id: string, values: Record<string, number | null>) =>
     req<AdminWorkspaceLimits>(`/api/admin/workspaces/${enc(id)}/limits`, { method: "PUT", ...json(values) }),

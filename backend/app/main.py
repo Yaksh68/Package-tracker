@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import accounts, crypto, db, limits, scan_queue, scheduler, storage
 from .api.admin import router as admin_router
+from .api.analytics import router as analytics_router
 from .api.routes import router
 from .api.workspaces import router as workspaces_router
 from .auth import CsrfMiddleware
@@ -71,6 +72,7 @@ app.include_router(auth_router)        # sign-in: public by design
 app.include_router(router)             # every route below checks rbac.ROUTE_PERMS
 app.include_router(workspaces_router)
 app.include_router(admin_router)
+app.include_router(analytics_router)
 
 
 @app.get("/api/health")

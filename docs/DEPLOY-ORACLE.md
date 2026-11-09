@@ -205,6 +205,9 @@ certificate.
 2. Add a public repository (e.g. `https://github.com/psf/requests`) and wait for
    its scan. It shows up in your personal workspace.
 3. Look over *Admin → Limits*. The defaults are in the README.
+4. *Admin → Analytics* shows how the service is doing: sign-ups, activity,
+   scans, AI use and the server's health. The health charts fill in from the
+   first hourly reading.
 
 That's the site live. The rest keeps it healthy.
 

@@ -16,7 +16,7 @@ planned release**. Each scan is saved as a timestamped snapshot so you can see
   page. Docker runs only PostgreSQL.
 - **Two modes**: `AUTH_MODE=none` (default) is a single local user. `AUTH_MODE=github`
   is the public multi-user service: Sign in with GitHub, team workspaces with
-  roles, invites, an audit log and a platform admin area.
+  roles, invites, an audit log and a platform admin area with analytics.
 
 ## How the AI auth works (important)
 
@@ -245,6 +245,7 @@ to run against Postgres (tables are truncated between tests — use a scratch DB
 | GET | `/api/admin/workspaces`, `/api/admin/workspaces/{id}` | platform admin: every workspace with member and repo counts; one workspace's members and repos (metadata only, and recorded in that workspace's audit log) |
 | GET/PUT | `/api/admin/limits` | platform admin: the limits every workspace gets |
 | GET/PUT | `/api/admin/workspaces/{id}/limits` | platform admin: one workspace's own limits (`null` = the platform's value), with its usage. Recorded in that workspace's audit log |
+| GET | `/api/admin/analytics/{panel}?start=&end=` | platform admin: one analytics panel (`overview`, `growth`, `activation`, `retention`, `scans`, `content`, `ai`, `system`, `workspaces`) for a range of UTC days, the last 30 by default. Totals and metadata only |
 | GET | `/api/info` | open to anyone: the mode, and the operator's name and contact |
 | GET | `/api/auth/github/login?next=/page`, `/api/auth/github/callback` | Sign in with GitHub (public mode), returning to `next` (a path on this site). A failed sign-in lands on `/login?error=` `cancelled`, `expired`, `github`, `disabled` or `full` |
 | POST | `/api/auth/logout` | end the session |

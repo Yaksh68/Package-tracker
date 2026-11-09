@@ -136,6 +136,7 @@ ROUTE_PERMS: dict[tuple[str, str], Perm | str] = {
     ("PUT", "/api/admin/limits"): PLATFORM_ADMIN,
     ("GET", "/api/admin/workspaces/{workspace_id}/limits"): PLATFORM_ADMIN,
     ("PUT", "/api/admin/workspaces/{workspace_id}/limits"): PLATFORM_ADMIN,
+    ("GET", "/api/admin/analytics/{panel}"): PLATFORM_ADMIN,
 }
 
 

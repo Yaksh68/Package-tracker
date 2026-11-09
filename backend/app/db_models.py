@@ -374,3 +374,22 @@ class ScanRunRow(Base):
     ai_searches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     ai_cost_usd: Mapped[float | None] = mapped_column(Float)
     upstream_errors: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+
+
+class SystemSampleRow(Base):
+    """An hourly reading of the server's health, for the admin analytics
+    (phase 6): the data volume's disk use, the database's size, the app's
+    memory and the scan queue. None where this platform can't measure it."""
+    __tablename__ = "system_samples"
+    __table_args__ = (Index("ix_system_samples_at", "at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    disk_used_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    disk_total_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    db_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    uploads_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    rss_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    mem_total_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    queue_waiting: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    scans_running: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

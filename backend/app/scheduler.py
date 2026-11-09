@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import audit, housekeeping, scan_queue, storage, uploads
+from . import analytics, audit, housekeeping, scan_queue, storage, uploads
 from .models import Repo
 
 log = logging.getLogger("packages-tracker.scheduler")
@@ -80,6 +80,15 @@ def _upkeep_job() -> None:
     housekeeping.prune_history()
 
 
+_SAMPLE_JOB = "system-sample"
+
+
+def _sample_job() -> None:
+    """Hourly: a reading of the server's health for the admin analytics.
+    Runs in a worker thread."""
+    analytics.record_sample()
+
+
 def resync_workspaces(workspace_ids: list[str]) -> None:
     """Reschedule these workspaces' repos, e.g. after a pause ends: overdue
     branches get their catch-up scans now rather than an interval from now."""
@@ -97,6 +106,11 @@ def start() -> AsyncIOScheduler:
         _scheduler.add_job(
             _upkeep_job, "interval", hours=24, id=_UPKEEP_JOB, replace_existing=True,
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
+            coalesce=True, misfire_grace_time=None, max_instances=1,
+        )
+        _scheduler.add_job(
+            _sample_job, "interval", hours=1, id=_SAMPLE_JOB, replace_existing=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
             coalesce=True, misfire_grace_time=None, max_instances=1,
         )
     return _scheduler
