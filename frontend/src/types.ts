@@ -381,3 +381,189 @@ export const FLAG_ORDER = [
   "OK",
   "IGNORED",
 ] as const;
+
+// ---- Admin analytics (phase 6) ------------------------------------------------
+// GET /api/admin/analytics/{panel}?start=&end= (platform admin only). Days are
+// UTC days; every panel carries the range it covers.
+export interface AnalyticsRange {
+  start: string;
+  end: string;
+  days: number;
+  previous: { start: string; end: string };
+}
+
+interface AnalyticsPanel {
+  range: AnalyticsRange;
+  generated_at: string;
+}
+
+export interface DayValue {
+  day: string;
+  value: number;
+}
+
+export interface AnalyticsTile {
+  key: string;
+  label: string;
+  value: number;
+  previous: number;
+  trend: DayValue[];
+  unit?: "usd";
+  better?: "lower";
+}
+
+export interface AnalyticsOverview extends AnalyticsPanel {
+  tiles: AnalyticsTile[];
+}
+
+export interface GrowthDay {
+  day: string;
+  users: number;
+  signups: number;
+  active: number;
+  active_7d: number;
+  workspaces_created: number;
+  repos_added: number;
+}
+
+export interface AnalyticsGrowth extends AnalyticsPanel {
+  days: GrowthDay[];
+}
+
+export interface ActivationStep {
+  key: string;
+  label: string;
+  users: number;
+  pct: number | null;
+}
+
+export interface AnalyticsActivation extends AnalyticsPanel {
+  cohort: number;
+  steps: ActivationStep[];
+}
+
+export interface RetentionCohort {
+  week: string;
+  users: number;
+  weeks: (number | null)[];
+}
+
+export interface AnalyticsRetention extends AnalyticsPanel {
+  cohorts: RetentionCohort[];
+}
+
+export interface Spread {
+  median: number | null;
+  p90: number | null;
+}
+
+export interface StageTime extends Spread {
+  stage: string;
+  runs: number;
+}
+
+export interface ScanDay {
+  day: string;
+  done: number;
+  degraded: number;
+  error: number;
+}
+
+export interface AnalyticsScans extends AnalyticsPanel {
+  totals: { runs: number; done: number; degraded: number; error: number; success_pct: number | null };
+  days: ScanDay[];
+  triggers: { trigger: string; runs: number }[];
+  stages: StageTime[];
+  duration: Spread;
+  queue_wait: Spread;
+  failures: { stage: string; error: number; degraded: number }[];
+  upstream_errors: { host: string; kind: string; count: number }[];
+}
+
+export interface AnalyticsContent extends AnalyticsPanel {
+  branches: number;
+  ecosystems: { ecosystem: string; packages: number; repos: number }[];
+  flags: { status: string; packages: number }[];
+  common_eol: { ecosystem: string; name: string; workspaces: number; repos: number }[];
+  common_min_workspaces: number;
+}
+
+export interface AiTotals {
+  runs: number;
+  tokens_in: number;
+  tokens_out: number;
+  searches: number;
+  cost_usd: number;
+}
+
+export interface AiProvider extends AiTotals {
+  provider: string;
+  unpriced_runs: number;
+  models: string[];
+}
+
+export interface AiDay extends AiTotals {
+  day: string;
+}
+
+export interface AnalyticsAi extends AnalyticsPanel {
+  totals: AiTotals & { scans: number; unpriced_runs: number };
+  statuses: { status: string; runs: number }[];
+  providers: AiProvider[];
+  days: AiDay[];
+  errors: { kind: string; runs: number }[];
+  results: { key: string; label: string; packages: number }[];
+}
+
+export interface SystemReading {
+  disk_used_bytes: number | null;
+  disk_total_bytes: number | null;
+  db_bytes: number | null;
+  uploads_bytes: number | null;
+  rss_bytes: number | null;
+  mem_total_bytes: number | null;
+  queue_waiting: number | null;
+  scans_running: number | null;
+}
+
+export interface SystemSample extends SystemReading {
+  at: string;
+}
+
+export interface AnalyticsSystem extends AnalyticsPanel {
+  now: SystemReading;
+  workers: number;
+  per: "hour" | "day";
+  samples: SystemSample[];
+}
+
+export interface AnalyticsWorkspace {
+  id: string;
+  name: string;
+  personal: boolean;
+  created_at: string | null;
+  members: number;
+  active_members: number;
+  repos: number;
+  scans: number;
+  failed_scans: number;
+  ai_cost_usd: number;
+  last_scan_at: string | null;
+  paused: boolean;
+}
+
+export interface AnalyticsWorkspaces extends AnalyticsPanel {
+  workspaces: AnalyticsWorkspace[];
+}
+
+export interface AnalyticsPanels {
+  overview: AnalyticsOverview;
+  growth: AnalyticsGrowth;
+  activation: AnalyticsActivation;
+  retention: AnalyticsRetention;
+  scans: AnalyticsScans;
+  content: AnalyticsContent;
+  ai: AnalyticsAi;
+  system: AnalyticsSystem;
+  workspaces: AnalyticsWorkspaces;
+}

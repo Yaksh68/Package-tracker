@@ -118,7 +118,7 @@ function Shell() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/members" element={<MembersPage />} />
           <Route path="/audit" element={<AuditPage />} />
-          <Route path="/admin" element={<AdminPage />} />
+          <Route path="/admin/:tab?" element={<AdminPage />} />
           <Route path="/invite/:token" element={<InvitePage />} />
           <Route
             path="*"
