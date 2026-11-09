@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     github_token: str | None = None
     # Token for query_github_repo (rate-limit); falls back to github_token.
     github_api_token: str | None = None
+    # Public mode: GitHub lookups during free scans without an account, when
+    # the visitor gives no token of their own. A token with no permissions is
+    # enough (it only reads public data) and lifts GitHub's limit from 60
+    # lookups an hour for the whole server to 5,000. Optional.
+    trial_github_token: str | None = None
 
     # Path to the Claude Code CLI binary the Agent SDK spawns. The subscription
     # login in ~/.claude is used automatically — no ANTHROPIC_API_KEY.

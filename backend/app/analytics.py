@@ -208,6 +208,7 @@ def overview(r: Range) -> dict:
         active = _active_days(s, lo, r.end, {uid for uid, _ in users})
         runs = _runs(s, lo, r.end, ScanRunRow.started_at, ScanRunRow.outcome, ScanRunRow.ai_cost_usd)
         added = [_day(at) for _, at, _ in _events(s, ("repo_added",), lo, r.end)]
+        trials = [_day(at) for _, at, _ in _events(s, ("trial_scan",), lo, r.end)]
     joined = sorted(created.date() for _, created in users)
     scanned = [(_day(at), outcome, cost or 0.0) for at, outcome, cost in runs]
     scan_days = [d for d, _, _ in scanned]
@@ -239,6 +240,8 @@ def overview(r: Range) -> dict:
         _tile("failed_scans", "Failed scans", within(r, failed), within(p, failed), _daily(failed, days),
               better="lower"),
         _tile("repos_added", "Repositories added", within(r, added), within(p, added), _daily(added, days)),
+        _tile("trial_scans", "Free scans (no account)", within(r, trials), within(p, trials),
+              _daily(trials, days)),
         _tile("ai_cost_usd", "AI spend (estimated)", spend(r), spend(p),
               [{"day": d.isoformat(), "value": round(spend_by_day.get(d, 0.0), 4)} for d in days], unit="usd"),
     ]}
@@ -554,11 +557,48 @@ def _ai_results(s: Session, r: Range) -> list[dict]:
     ]
 
 
+TRIAL_LIMITS = ("trial_scans_per_day", "trial_scans_per_ip")
+
+
+def trials(r: Range) -> dict:
+    """Free scans without an account (trial.py): how many started, how they
+    went, how many visitors signed in to keep theirs, and the ones refused (a
+    limit, or a busy queue). From usage events, which outlast the guests."""
+    with session() as s:
+        rows = s.execute(select(UsageEventRow.event, UsageEventRow.at, UsageEventRow.meta).where(
+            UsageEventRow.event.in_(("trial_scan", "trial_finished", "trial_saved", "trial_busy", "limit_hit")),
+            UsageEventRow.at >= r.lo, UsageEventRow.at < r.hi)).all()
+    per_day: dict[date, Counter] = defaultdict(Counter)
+    totals: Counter = Counter()
+    refused: Counter = Counter()
+    for event, at, meta in rows:
+        meta = meta or {}
+        if event == "limit_hit":
+            if meta.get("limit") in TRIAL_LIMITS:
+                refused[meta["limit"]] += 1
+            continue
+        if event == "trial_busy":
+            refused["busy"] += 1
+            continue
+        key = ({"trial_scan": "started", "trial_saved": "saved"}.get(event)
+               or ("failed" if meta.get("outcome") == "error" else "results"))
+        totals[key] += 1
+        per_day[_day(at)][key] += 1
+    return {
+        "totals": {"started": totals["started"], "results": totals["results"], "failed": totals["failed"],
+                   "saved": totals["saved"], "saved_pct": _pct(totals["saved"], totals["started"])},
+        "days": [{"day": d.isoformat(), "started": per_day[d]["started"], "saved": per_day[d]["saved"]}
+                 for d in r.each_day()],
+        "refused": [{"reason": k, "count": n} for k, n in refused.most_common()],
+    }
+
+
 def workspaces(r: Range) -> dict:
-    """One row per workspace: metadata and counts, nothing from its scans."""
+    """One row per workspace: metadata and counts, nothing from its scans.
+    Free scans' short-lived workspaces are left out (see `trials`)."""
     with session() as s:
         rows = s.execute(select(WorkspaceRow.id, WorkspaceRow.name, WorkspaceRow.personal,
-                                WorkspaceRow.created_at)).all()
+                                WorkspaceRow.created_at).where(WorkspaceRow.trial.is_(False))).all()
         members: dict[str, set[str]] = defaultdict(set)
         for ws, uid in s.execute(select(MembershipRow.workspace_id, MembershipRow.user_id)):
             members[ws].add(uid)
@@ -687,8 +727,11 @@ def system(r: Range) -> dict:
         for f, v in zip(SAMPLE_FIELDS, values):
             if v is not None and (point[f] is None or v > point[f]):
                 point[f] = v
-    return {"now": measure(), "workers": get_settings().scan_workers,
-            "per": "day" if daily else "hour", "samples": list(points.values())}
+    s = get_settings()
+    # the public mode has one more worker, for free scans (scan_queue.trial)
+    workers = s.scan_workers + (1 if s.public_mode() else 0)
+    return {"now": measure(), "workers": workers, "per": "day" if daily else "hour",
+            "samples": list(points.values())}
 
 
 # --------------------------------------------------------------------------- #
@@ -697,6 +740,7 @@ def system(r: Range) -> dict:
 PANELS: dict[str, Callable[[Range], dict]] = {
     "overview": overview, "growth": growth, "activation": activation, "retention": retention,
     "scans": scans, "content": content, "ai": ai, "system": system, "workspaces": workspaces,
+    "trials": trials,
 }
 _LIVE = {"system"}  # measured fresh on every request
 

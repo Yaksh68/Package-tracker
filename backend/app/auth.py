@@ -103,7 +103,7 @@ def get_principal(request: Request) -> Principal:
     user = accounts.user_for_session(request.cookies.get(session_cookie_name()))
     if user is None:
         raise HTTPException(401, "sign in first")
-    if accounts.touch_activity(user.id):
+    if user.status != "guest" and accounts.touch_activity(user.id):
         _resume_paused(user.id)  # their first visit today: wake any workspace that was paused
     workspaces = accounts.user_workspaces(user.id)
     wanted = request.headers.get("x-workspace")
@@ -254,6 +254,14 @@ async def github_callback(request: Request, code: str | None = None, state: str 
         # platform admins get them
         await asyncio.to_thread(accounts.add_member, LOCAL_WORKSPACE_ID, user.id, "owner")
     accounts.record_event("sign_up" if created else "sign_in", user_id=user.id)
+    # signing in after a free scan keeps it: the repo moves into their workspace
+    guest = await asyncio.to_thread(accounts.user_for_session, request.cookies.get(session_cookie_name()))
+    if guest is not None and guest.status == "guest":
+        from . import trial  # (it imports the scan pipeline)
+        try:
+            await asyncio.to_thread(trial.claim, guest.id, user.id)
+        except Exception:  # noqa: BLE001 - signing in must still work
+            log.exception("could not keep the free scan of guest %s", guest.id)
     session_token = await asyncio.to_thread(accounts.create_session, user.id,
                                             request.headers.get("user-agent"))
     resp = RedirectResponse(safe_next(request.cookies.get(NEXT_COOKIE)), status_code=302)

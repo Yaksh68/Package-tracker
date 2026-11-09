@@ -34,6 +34,10 @@ DEFAULTS: dict[str, int] = {
     "unpacked_mb": 500,
     "upload_storage_mb": 200,
     "snapshots_per_branch": 30,
+    # free scans without an account (trial.py); 0 a day turns them off
+    "trial_scans_per_day": 100,
+    "trial_scans_per_ip": 3,
+    "trial_hours": 24,
 }
 
 LABELS: dict[str, str] = {
@@ -47,10 +51,15 @@ LABELS: dict[str, str] = {
     "unpacked_mb": "Unpacked zip size (MB)",
     "upload_storage_mb": "Upload storage per workspace (MB)",
     "snapshots_per_branch": "Scans kept per branch",
+    "trial_scans_per_day": "Free scans without an account, per day (0 turns them off)",
+    "trial_scans_per_ip": "Free scans per network (IP address) per day",
+    "trial_hours": "Hours a free scan's results are kept unless saved",
 }
 
-# limits that apply per user, not per workspace: no workspace overrides
-_PLATFORM_ONLY = {"workspaces_per_user"}
+# limits that aren't a workspace's: no workspace overrides
+_PLATFORM_ONLY = {"workspaces_per_user", "trial_scans_per_day", "trial_scans_per_ip", "trial_hours"}
+# limits that may be 0 (off); every other limit is at least 1
+_MAY_BE_ZERO = {"trial_scans_per_day"}
 _MAX = 100_000
 
 _MESSAGES = {
@@ -63,6 +72,8 @@ _MESSAGES = {
                              "Try again later; scheduled scans still run.",
     "upload_storage_mb": "This workspace's uploaded zips would take more than {limit} MB. "
                          "Delete versions you no longer need first.",
+    "trial_scans_per_day": "Today's free scans are used up. Sign in with GitHub to scan straight away.",
+    "trial_scans_per_ip": "You've used today's free scans from this network. Sign in with GitHub to scan more.",
 }
 
 
@@ -90,7 +101,9 @@ def _clean(values: dict, *, allow_none: bool) -> dict:
             continue
         if isinstance(v, bool) or not isinstance(v, int):
             raise ValueError(f"{k} must be a whole number")
-        floor = 1  # 0 would make the feature unusable rather than unlimited
+        # 0 would make a feature unusable rather than unlimited, except where
+        # 0 means off on purpose
+        floor = 0 if k in _MAY_BE_ZERO else 1
         if not floor <= v <= _MAX:
             raise ValueError(f"{k} must be between {floor} and {_MAX}")
         out[k] = v

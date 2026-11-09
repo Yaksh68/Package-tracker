@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import analytics, audit, housekeeping, scan_queue, storage, uploads
+from . import accounts, analytics, audit, housekeeping, scan_queue, storage, uploads
 from .models import Repo
 
 log = logging.getLogger("packages-tracker.scheduler")
@@ -89,6 +89,16 @@ def _sample_job() -> None:
     analytics.record_sample()
 
 
+_TRIAL_JOB = "trial-expire"
+
+
+def _trial_job() -> None:
+    """Hourly: delete the free scans nobody saved (trial.py). Runs in a
+    worker thread."""
+    from . import trial  # (it imports the API's deletion helpers, which import this module)
+    trial.expire()
+
+
 def resync_workspaces(workspace_ids: list[str]) -> None:
     """Reschedule these workspaces' repos, e.g. after a pause ends: overdue
     branches get their catch-up scans now rather than an interval from now."""
@@ -97,12 +107,25 @@ def resync_workspaces(workspace_ids: list[str]) -> None:
             sync_repo(repo)
 
 
+def _requeue_trials() -> None:
+    """A restart empties the queue: free scans that never ran go back in, but
+    without the visitor's token, which only lived in memory (a private repo's
+    scan then fails with a clear clone error)."""
+    trial_ws = accounts.trial_workspace_ids()
+    for repo in storage.load_repos():
+        if repo.workspace_id in trial_ws:
+            for branch in repo.branches:
+                if branch not in repo.last_scan_by_branch:
+                    scan_queue.enqueue_trial(repo, branch, None)
+
+
 def start() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
         _scheduler = AsyncIOScheduler(timezone="UTC")
         _scheduler.start()
         sync_all()
+        _requeue_trials()
         _scheduler.add_job(
             _upkeep_job, "interval", hours=24, id=_UPKEEP_JOB, replace_existing=True,
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
@@ -111,6 +134,11 @@ def start() -> AsyncIOScheduler:
         _scheduler.add_job(
             _sample_job, "interval", hours=1, id=_SAMPLE_JOB, replace_existing=True,
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+            coalesce=True, misfire_grace_time=None, max_instances=1,
+        )
+        _scheduler.add_job(
+            _trial_job, "interval", hours=1, id=_TRIAL_JOB, replace_existing=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=5),
             coalesce=True, misfire_grace_time=None, max_instances=1,
         )
     return _scheduler
@@ -138,10 +166,15 @@ def sync_repo(repo: Repo, *, catchup_slot: int = 0, scanning_now: set[str] | fro
     """
     if _scheduler is None:
         return 0
-    wanted = {_job_id(repo.id, b) for b in repo.branches}
+    # a free scan without an account is one scan: never scheduled (once its
+    # visitor signs in, the repo moves to their workspace and syncs again)
+    trial = accounts.is_trial_workspace(repo.workspace_id)
+    wanted = set() if trial else {_job_id(repo.id, b) for b in repo.branches}
     for job in _scheduler.get_jobs():
         if job.id.startswith(f"{_JOB_PREFIX}{repo.id}::") and job.id not in wanted:
             _scheduler.remove_job(job.id)
+    if trial:
+        return 0
 
     now = datetime.now(timezone.utc)
     overdue = 0

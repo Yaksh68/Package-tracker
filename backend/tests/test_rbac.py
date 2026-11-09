@@ -16,7 +16,8 @@ from app.models import Repo
 
 CSRF = {"X-Requested-With": "packages-tracker"}
 PUBLIC_ROUTES = {("GET", "/api/health"), ("GET", "/api/info"), ("GET", "/api/auth/github/login"),
-                 ("GET", "/api/auth/github/callback"), ("POST", "/api/auth/logout")}
+                 ("GET", "/api/auth/github/callback"), ("POST", "/api/auth/logout"),
+                 ("POST", "/api/trial")}
 
 
 # --------------------------------------------------------------------------- #

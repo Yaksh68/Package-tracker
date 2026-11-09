@@ -12,6 +12,9 @@ hundreds of lookups.
   is merged into the one already there.
 - The queue lives in memory. A restart drops it: overdue scheduled scans come
   back through the scheduler's catch-ups, manual ones must be started again.
+- Free scans without an account (trial.py) have a queue of their own with one
+  worker, so they never hold up signed-in users' scans. A trial's job carries
+  the visitor's token, in memory only, to that one scan.
 
 Everything here runs on the event loop's thread. Route handlers that run in
 the thread pool only read `_positions`, a plain dict replaced (never mutated)
@@ -22,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from . import pipeline, storage
@@ -39,6 +42,8 @@ class Job:
     workspace_id: str
     trigger: str
     queued_at: datetime
+    # a trial's visitor token: only in memory, only for this job's scan
+    token: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def key(self) -> tuple[str, str]:
@@ -69,14 +74,14 @@ class ScanQueue:
         return len(self._positions)
 
     # ---- changing (event loop only) -----------------------------------------
-    def enqueue(self, repo: Repo, branch: str, trigger: str) -> bool:
+    def enqueue(self, repo: Repo, branch: str, trigger: str, token: str | None = None) -> bool:
         """Queue a scan. False when that branch is already queued or running:
         the request is merged into that scan."""
         key = (repo.id, branch)
         if key in self._positions or key in self._running or pipeline.is_scanning(*key):
             return False
         ws = repo.workspace_id or LOCAL_WORKSPACE_ID
-        job = Job(repo.id, branch, ws, trigger, datetime.now(timezone.utc))
+        job = Job(repo.id, branch, ws, trigger, datetime.now(timezone.utc), token=token)
         self._pending.setdefault(ws, deque()).append(job)
         if ws not in self._turns:
             self._turns.append(ws)
@@ -152,7 +157,8 @@ class ScanQueue:
                 if repo is None or job.branch not in repo.branches:
                     pipeline.mark_idle(job.repo_id, job.branch)
                 else:
-                    await pipeline.run_scan(repo, job.branch, trigger=job.trigger, queued_at=job.queued_at)
+                    await pipeline.run_scan(repo, job.branch, trigger=job.trigger, queued_at=job.queued_at,
+                                            trial_token=job.token)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - one bad scan mustn't stop the worker
@@ -168,6 +174,7 @@ class ScanQueue:
 
 
 _queue: ScanQueue | None = None
+_trial: ScanQueue | None = None  # free scans without an account: one worker of their own
 
 
 def get() -> ScanQueue:
@@ -180,44 +187,68 @@ def get() -> ScanQueue:
     return _queue
 
 
+def trial() -> ScanQueue:
+    """The free scans' queue, with a single worker."""
+    global _trial
+    loop = asyncio.get_running_loop()
+    if _trial is None or _trial.loop is not loop:
+        _trial = ScanQueue(1, 1)
+    return _trial
+
+
+def _queues() -> list[ScanQueue]:
+    return [q for q in (_queue, _trial) if q is not None]
+
+
 def enqueue(repo: Repo, branch: str, trigger: str = "manual") -> bool:
     return get().enqueue(repo, branch, trigger)
 
 
+def enqueue_trial(repo: Repo, branch: str, token: str | None) -> bool:
+    """Queue a free scan, with the visitor's token for that scan only."""
+    return trial().enqueue(repo, branch, "trial", token=token)
+
+
+def trial_waiting() -> int:
+    q = _trial
+    return q.waiting() if q else 0
+
+
 def position(repo_id: str, branch: str) -> int | None:
-    return _queue.position(repo_id, branch) if _queue else None
+    for q in _queues():
+        if (pos := q.position(repo_id, branch)) is not None:
+            return pos
+    return None
 
 
 def stats() -> tuple[int, int]:
-    """(waiting, running) right now, for the admin analytics. Safe from any
-    thread: it only reads the sizes."""
-    q = _queue
-    return (q.waiting(), len(q._running)) if q else (0, 0)
+    """(waiting, running) right now in both queues, for the admin analytics.
+    Safe from any thread: it only reads the sizes."""
+    qs = _queues()
+    return sum(q.waiting() for q in qs), sum(len(q._running) for q in qs)
 
 
 def busy(repo_id: str, branch: str) -> bool:
     """Queued or running."""
-    return (_queue is not None and _queue.queued(repo_id, branch)) or pipeline.is_scanning(repo_id, branch)
+    return any(q.queued(repo_id, branch) for q in _queues()) or pipeline.is_scanning(repo_id, branch)
 
 
 def cancel_repo(repo_id: str) -> None:
     """Callable from any thread (repo deletion runs in the thread pool). A
     worker that reaches a deleted repo's job skips it anyway."""
-    q = _queue
-    if q is None:
-        return
     try:
         here = asyncio.get_running_loop()
     except RuntimeError:
         here = None
-    if here is q.loop:
-        q.cancel_repo(repo_id)
-    elif not q.loop.is_closed():
-        q.loop.call_soon_threadsafe(q.cancel_repo, repo_id)
+    for q in _queues():
+        if here is q.loop:
+            q.cancel_repo(repo_id)
+        elif not q.loop.is_closed():
+            q.loop.call_soon_threadsafe(q.cancel_repo, repo_id)
 
 
 def shutdown() -> None:
-    global _queue
-    if _queue is not None:
-        _queue.shutdown()
-        _queue = None
+    global _queue, _trial
+    for q in _queues():
+        q.shutdown()
+    _queue = _trial = None

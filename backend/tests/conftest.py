@@ -20,7 +20,7 @@ def _isolated_db(monkeypatch):
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret-key-for-the-test-suite")
     monkeypatch.setenv("LOCAL_SECRET_KEY_FILE", f"{tmp}/secret.key")
 
-    from app import analytics, crypto, db, ratelimit
+    from app import analytics, crypto, db, ratelimit, trial
     from app.config import get_settings
     from app.db_models import Base
 
@@ -29,6 +29,7 @@ def _isolated_db(monkeypatch):
     # every TestClient comes from the same address: don't let one test's
     # requests count against the next one's rate limits
     ratelimit.reset()
+    trial.reset()
     analytics.clear_cache()
     db.reset_engine()
     engine = db.get_engine()

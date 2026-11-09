@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from .. import accounts, audit, housekeeping, limits, rbac, scan_queue, scanlog, scheduler, settings_store, storage, uploads
+from .. import accounts, audit, housekeeping, limits, rbac, scan_queue, scanlog, scheduler, settings_store, storage, trial, uploads
 from .. import flags as flags_mod
 from ..ai import probe
 from ..ai.errors import AiError, redact_keys
@@ -67,6 +67,9 @@ def me_route(me: Principal = Depends(get_principal)) -> dict:
         # scheduled scans paused for inactivity, now or until recently
         "scans_paused": housekeeping.pause_notice(me.workspace_id) if get_settings().public_mode() else None,
         "workspaces": [w.model_dump() for w in me.workspaces],
+        # a free scan without an account: the visitor can only look at it
+        "guest": me.user.status == "guest",
+        "trial": trial.info(me.user),
     }
 
 
