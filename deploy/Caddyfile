@@ -1,0 +1,33 @@
+# Caddy in front of the app (phase 5): it gets and renews the HTTPS
+# certificate from Let's Encrypt by itself, redirects HTTP to HTTPS, and adds
+# the security headers. DOMAIN and ACME_EMAIL come from deploy/.env.cloud.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Zips up to the default 50 MB limit, plus room for the form around them.
+	# If you raise the zip limit in Admin, raise this too.
+	request_body {
+		max_size 60MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		# antd styles itself with inline <style> tags; scripts stay same-origin only
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://avatars.githubusercontent.com; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		-Server
+	}
+
+	# file names under /assets carry a content hash, so they never change
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	reverse_proxy app:8000
+}

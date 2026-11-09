@@ -1,0 +1,73 @@
+# Packages Tracker on one VM (phase 5): the app, PostgreSQL, and Caddy for
+# automatic HTTPS. From the repo root:
+#
+#   docker compose -f deploy/compose.cloud.yml --env-file deploy/.env.cloud up -d --build
+#
+# (deploy/update.sh does that after a git pull.) Only Caddy is reachable from
+# outside; the app and the database are on the internal network. The whole
+# walkthrough is in docs/DEPLOY-ORACLE.md.
+name: packages-tracker
+
+services:
+  app:
+    build:
+      context: ..
+    image: packages-tracker:latest
+    restart: unless-stopped
+    env_file: .env.cloud
+    environment:
+      AUTH_MODE: github
+      PUBLIC_BASE_URL: https://${DOMAIN:?set DOMAIN in deploy/.env.cloud}
+      DATABASE_URL: postgresql+psycopg://packages:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env.cloud}@postgres:5432/packages_tracker
+    volumes:
+      - appdata:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8000"
+    logging: &logs
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: packages_tracker
+      POSTGRES_USER: packages
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env.cloud}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U packages -d packages_tracker"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logs
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in deploy/.env.cloud}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in deploy/.env.cloud}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # the certificates: keep this volume
+      - caddy_config:/config
+    depends_on:
+      - app
+    logging: *logs
+
+volumes:
+  appdata:
+  pgdata:
+  caddy_data:
+  caddy_config:
