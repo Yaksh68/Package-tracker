@@ -441,9 +441,34 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   without `APP_SECRET_KEY`), encrypts any per-repo token still in plain text,
   then starts/stops the scheduler. If Postgres is down, startup fails and
   systemd retries.
-- `app` — FastAPI + CORS (Vite origins) + `CsrfMiddleware` + the routers
-  (`auth`, then `routes`, `workspaces` and `admin`, all three behind
-  `rbac.authorize`); `GET /api/health`.
+- `app` — FastAPI + CORS (Vite origins, `APP_ENV=dev` only) + `CsrfMiddleware`
+  + `RateLimitMiddleware` + the routers (`auth`, then `routes`, `workspaces`
+  and `admin`, all three behind `rbac.authorize`); `GET /api/health` and the
+  public `GET /api/info`.
+- `serve_ui(app, root)` — with `STATIC_DIR` set (the image sets
+  `/app/static`), serves the built UI: its files as they are, `index.html` for
+  every other non-API path (client-side routes), and the API's own 404 for
+  unknown `/api/...` paths. Registered last, after every API route.
+- **One process only.** The scheduler, the scan queue and the rate limits live in
+  its memory, so uvicorn must never run with `--workers`.
+
+### Deployment files (phase 5)
+- `Dockerfile` (repo root): a Node stage builds `frontend/dist`; the final
+  `python:3.11-slim` image adds `git` and `tini`, installs
+  `backend/requirements.lock`, runs as user `app` (uid 10001) with `/data` as a
+  volume, health-checks `/api/health`, and starts
+  `uvicorn --proxy-headers` (the visitor's address comes from Caddy).
+- `deploy/compose.cloud.yml`: `app`, `postgres:16-alpine` (internal only) and
+  `caddy:2-alpine` (80/443, automatic HTTPS). `deploy/Caddyfile` sets the upload
+  size cap, HSTS, the Content-Security-Policy (no inline scripts, which is why
+  the first-paint theme script is `public/theme-init.js`) and long caching for
+  `/assets`. Settings: `deploy/.env.cloud` (from `.env.cloud.example`).
+- `deploy/update.sh` (pull, rebuild, restart) and `deploy/backup.sh` (pg_dump +
+  uploads, kept 14 days, copied off the VM with rclone).
+- CI: `.github/workflows/ci.yml` (backend and frontend tests on every push but
+  docs-only ones) and `image.yml` (builds the image and smoke-tests it when its
+  inputs change). The VM builds its own image; there's no registry.
+- The runbook: `docs/DEPLOY-ORACLE.md`.
 
 ### `api/routes.py` (REST — reads/writes via `storage.py`)
 - Every route takes `me: Principal = Depends(get_principal)`, and the router's
@@ -848,9 +873,14 @@ python -m uv venv --python 3.11 .venv
 python -m uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
 .venv/Scripts/python.exe -m pytest
 ```
-(`.venv/bin/python` on Linux/macOS.) The tests never load `claude-agent-sdk`,
-which bundles the whole Claude Code CLI. On a slow connection, install
-everything else first and add it later. Frontend: `cd frontend && npm ci && npm
+(`.venv/bin/python` on Linux/macOS.) `claude-agent-sdk` is an optional extra
+(`.[claude]`), only for `AGENT_BACKEND=sdk`/`auto`: it bundles the whole Claude
+Code CLI, and neither the tests nor the image need it.
+
+**Dependencies are locked** in `backend/requirements.lock` (exact versions for
+Linux on amd64 and arm64), which the image and CI install. After changing
+`pyproject.toml`, refresh it with
+`uv pip compile --universal --python-version 3.11 pyproject.toml -o requirements.lock`. Frontend: `cd frontend && npm ci && npm
 test && npm run build`.
 
 Phase 0 of the cloud plan added these tests:

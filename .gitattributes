@@ -1,0 +1,8 @@
+# Files that run on Linux (the VM, the image) keep LF line endings, even when
+# checked out on Windows: a shell script with CRLF fails with "bad interpreter".
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+deploy/Caddyfile text eol=lf
+*.yml           text eol=lf
+*.example       text eol=lf

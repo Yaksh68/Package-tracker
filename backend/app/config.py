@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     platform_admins: str = ""
     max_users: int = 50
     session_days: int = 30
+    # "dev" allows the Vite dev server's origins (CORS); the Docker image sets
+    # "prod". STATIC_DIR: the built UI (frontend/dist) to serve from the same
+    # address as the API; the image sets it.
+    app_env: str = "dev"
+    static_dir: str = ""
     # Requests a minute (public mode, ratelimit.py): sign-in per address; API
     # calls per session, per address, and per address without a session.
     rate_limit_signin: int = 10

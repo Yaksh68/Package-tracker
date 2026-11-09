@@ -1,6 +1,6 @@
 # Cloud deployment: public multi-user Packages Tracker (implementation plan)
 
-> **Status:** Phases 0 and 1 are merged (2026-11-07), and so are 2a, 2b and 3 (2026-11-08). Phase 4 is done on `phase-4-limits` (2026-11-08). Each phase ships as its own branch and pull request.
+> **Status:** Phases 0 and 1 are merged (2026-11-07); 2a, 2b, 3 and 4 too (2026-11-08). Phase 5 is written on `phase-5-deploy` (2026-11-09) and waits for its first run on the VM. Each phase ships as its own branch and pull request.
 >
 > **Decisions locked (2026-11-07):**
 > 1. **Public multi-user service.** People sign in, work in **workspaces** (teams), and bring their own AI keys.
@@ -460,6 +460,17 @@ Done 2026-11-08: 405 backend tests pass, 33 of them new in `test_rbac.py`.
 - Docker isn't installed on the dev machine, so 5.1 to 5.3 get tested on the VM.
 
 **Done when:** following the runbook on a fresh VM gives a working HTTPS site within an hour, where you can sign in, add a GitHub repo, scan it and see the results.
+
+**Phase 5 as built (2026-11-09):**
+- The files: `Dockerfile` and `.dockerignore`; the `deploy/` folder (`compose.cloud.yml`, `Caddyfile`, `.env.cloud.example`, `update.sh`, `backup.sh`); `.github/workflows/ci.yml` and `image.yml`; and the runbook, `docs/DEPLOY-ORACLE.md`.
+- The image installs `backend/requirements.lock`, so the VM gets exactly the versions CI tests. `claude-agent-sdk` is now an optional extra: it bundles the whole CLI, which the cloud can't use.
+- The UI's first-paint theme script moved to a file, so the Content-Security-Policy can forbid inline scripts.
+- Backups go to OCI Object Storage (Always Free, 20 GB) through rclone's S3-compatible API, and the runbook has a restore test.
+- The runbook also covers:
+  - converting to Pay As You Go, so Oracle doesn't reclaim an idle VM;
+  - reserving the public IP;
+  - opening the VM's own firewall before Docker is installed.
+- **Not run yet:** Docker isn't on the dev machine. The image is first built by CI (`image.yml`, amd64), then on the VM (arm64) when you follow the runbook.
 
 ---
 

@@ -1,0 +1,25 @@
+# Only what the image needs: backend/ (minus tests and local data) and
+# frontend/ (minus its build and node_modules).
+.git
+.github
+.playwright-mcp
+docs
+deploy
+**/*.md
+
+# secrets and local settings never go into an image
+**/.env
+**/.env.*
+
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+frontend/dist
+
+backend/.venv
+backend/tests
+backend/evals
+backend/data
+backend/uploads
+backend/cache
