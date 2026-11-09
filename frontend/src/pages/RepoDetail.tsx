@@ -86,10 +86,14 @@ export function RepoDetail() {
 
   const scanMut = useMutation({
     mutationFn: () => api.scanNow(id, branch!),
-    onSuccess: () => {
-      message.info("Scan started");
-      // show "Scanning" right away instead of waiting for the next poll
-      qc.setQueryData(["scan-status", id, branch], (s: typeof status) => (s ? { ...s, state: "running", phase: "" } : s));
+    onSuccess: (r) => {
+      if (r.merged) message.info(r.status === "running" ? "This branch is already scanning" : "This branch is already queued");
+      else message.info(r.queue_position && r.queue_position > 1
+        ? `Scan queued: ${r.queue_position - 1} ahead of it`
+        : "Scan queued");
+      // show the new state right away instead of waiting for the next poll
+      qc.setQueryData(["scan-status", id, branch], (s: typeof status) =>
+        (s ? { ...s, state: r.status, phase: "", queue_position: r.queue_position } : s));
       qc.invalidateQueries({ queryKey: ["scan-status", id, branch] });
     },
     onError: (e) => message.error(errorMessage(e)),
@@ -145,7 +149,7 @@ export function RepoDetail() {
             onChange={(b) => setSearchParams({ branch: b })}
             options={(repo?.branches ?? []).map((b) => ({ value: b, label: b }))}
           />
-          <ScanStatusPill state={status?.state} phase={status?.phase} />
+          <ScanStatusPill state={status?.state} phase={status?.phase} position={status?.queue_position} />
         </Space>
         <Space>
           <AiStatusTag status={currentSnapshot?.ai_status} detail={currentSnapshot?.ai_detail} />

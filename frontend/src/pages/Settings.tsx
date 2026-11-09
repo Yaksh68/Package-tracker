@@ -1,7 +1,8 @@
 import { CheckCircleFilled, LinkOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Alert, App, AutoComplete, Button, Card, Form, Input, Result, Select, Skeleton, Space, Switch, Typography,
+  Alert, App, AutoComplete, Button, Card, Descriptions, Form, Input, InputNumber, Progress, Result, Select, Skeleton,
+  Space, Switch, Typography,
 } from "antd";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, errorMessage } from "../api";
@@ -68,6 +69,7 @@ function fromSettings(s: WorkspaceSettings): AiFormValues {
     model: s.ai_model,
     baseUrl: s.ai_base_url,
     searchProvider: s.search_provider,
+    reuseDays: s.ai_reuse_days ?? 7,
     aiKey: "",
     searchKey: "",
     removeAiKey: false,
@@ -310,6 +312,17 @@ function AiResearchCard({ settings, editable }: { settings: WorkspaceSettings; e
           </>
         )}
 
+        <Form.Item
+          label="Reuse findings for"
+          extra="A package version the AI already researched in this workspace within this many days isn't researched again, which saves your quota. 0 asks the AI every time."
+        >
+          <Space>
+            <InputNumber min={0} max={90} precision={0} value={v.reuseDays} style={{ width: 90 }}
+              onChange={(n) => set({ reuseDays: n ?? 0 })} aria-label="Reuse findings for (days)" />
+            <span>days</span>
+          </Space>
+        </Form.Item>
+
         <Button type="primary" onClick={() => saveMut.mutate()} loading={saveMut.isPending} disabled={!editable || invalid}>
           Save
         </Button>
@@ -387,6 +400,53 @@ function GitTokensCard({ settings, editable }: { settings: WorkspaceSettings; ed
   );
 }
 
+// limits a workspace uses up, and the fixed ones (per repo, per scan, per zip)
+const METERED = ["repos_per_workspace", "members_per_workspace", "upload_storage_mb", "manual_scans_per_hour"];
+const FIXED = ["branches_per_repo", "min_interval_days", "zip_mb", "unpacked_mb", "snapshots_per_branch"];
+
+function Meter({ label, used, limit, unit = "" }: { label: string; used: number; limit: number; unit?: string }) {
+  const pct = Math.min(100, Math.round((used / limit) * 100));
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <Typography.Text>{label}</Typography.Text>
+        <Typography.Text type={used >= limit ? "danger" : "secondary"}>
+          {used}{unit} of {limit}{unit}
+        </Typography.Text>
+      </div>
+      <Progress percent={pct} showInfo={false} size="small" status={used >= limit ? "exception" : "normal"} />
+    </div>
+  );
+}
+
+/** What the workspace uses against its limits (public mode). */
+function UsageCard() {
+  const { isPublic } = useSession();
+  const q = useQuery({ queryKey: ["limits"], queryFn: api.limits, enabled: isPublic });
+  const d = q.data;
+  if (!isPublic || !d?.enabled || !d.limits || !d.usage || !d.labels) return null;
+  const { limits, usage, labels } = d;
+  return (
+    <Card title="Usage and limits" style={{ marginTop: 16 }}>
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        {METERED.map((name) => (
+          <Meter key={name} label={labels[name]} used={usage[name] ?? 0} limit={limits[name]}
+            unit={name.endsWith("_mb") ? " MB" : ""} />
+        ))}
+      </Space>
+      <Descriptions
+        size="small"
+        column={1}
+        style={{ marginTop: 16 }}
+        items={FIXED.map((name) => ({ key: name, label: labels[name], children: limits[name] }))}
+      />
+      <Typography.Paragraph type="secondary" style={{ margin: "12px 0 0" }}>
+        Whoever runs this service sets these limits.
+      </Typography.Paragraph>
+    </Card>
+  );
+}
+
 export function SettingsPage() {
   const { can, why, workspace, isPublic } = useSession();
   const q = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
@@ -413,6 +473,7 @@ export function SettingsPage() {
         <>
           <AiResearchCard settings={q.data} editable={editable} />
           <GitTokensCard settings={q.data} editable={editable} />
+          <UsageCard />
         </>
       )}
     </div>

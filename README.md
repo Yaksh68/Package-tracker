@@ -122,6 +122,9 @@ branch, planned release date, and interval. The first scan starts immediately.
 | `OPERATOR_NAME` / `CONTACT_EMAIL` | Who runs the service, shown on the privacy policy and terms pages |
 | `GIT_HOST_ALLOWLIST` | Comma-separated hosts repos may be cloned from (`*.example.com` = subdomains). Empty = any host in the local mode; the public mode defaults to github.com, gitlab.com, bitbucket.org, codeberg.org |
 | `CLONE_TIMEOUT_SECONDS` | Kill a clone that runs longer than this (default 120) |
+| `SCAN_WORKERS` | Scans that run at once (default 2). In the public mode each workspace runs one at a time and workspaces take turns |
+| `LOOKUP_CONCURRENCY` | Package lookups one scan runs at a time (default 6) |
+| `RATE_LIMIT_SIGNIN` / `RATE_LIMIT_SESSION` / `RATE_LIMIT_ADDRESS` / `RATE_LIMIT_ANONYMOUS` | Public mode, requests a minute: sign-in per address (10), API calls per session (300), per address (600) and per address without a session (60) |
 | `IMAGE_INSPECT` | Docker image inventory: `auto` (default: use Docker when it's there, otherwise skip without degrading the scan), `on`, or `off`. Always off in the public mode |
 | `GITLAB_TOKEN` / `GITHUB_TOKEN` | Repo read PATs; injected into the clone URL at runtime, never stored in snapshots or logs |
 | `GITHUB_API_TOKEN` | Optional; raises GitHub API rate limit for enrichment (falls back to `GITHUB_TOKEN`) |
@@ -138,6 +141,7 @@ branch, planned release date, and interval. The first scan starts immediately.
 | `USE_ENRICHMENT_AGENT` | `true` (default) to run the AI research agent for ambiguous packages; also toggleable live from the dashboard header ("AI research") |
 | `WEB_SEARCH_MAX_USES` | web-search cap per AI enrichment batch (default 5) |
 | `ENRICHMENT_BATCH_SIZE` | packages per AI enrichment conversation (default 18) |
+| `AI_REUSE_DAYS` | Reuse an AI finding for the same package version from the last N days' scans instead of researching it again (default 7; 0 = always research). The local workspace's default; each workspace sets its own in Settings |
 | `APT_INDEX_CACHE_DIR` | Cache for downloaded apt package indexes (default `cache/apt-index`, ~26 MB per Ubuntu release) |
 | `UPLOAD_DIR` | Where uploaded source zips are kept (default `uploads`, relative to `backend/`) |
 | `UPLOAD_MAX_MB` / `UPLOAD_MAX_UNPACKED_MB` / `UPLOAD_MAX_FILES` | Upload limits (defaults 200 MB zip, 2048 MB unpacked, 100 000 files; skipped dirs don't count) |
@@ -200,7 +204,7 @@ to run against Postgres (tables are truncated between tests — use a scratch DB
 |---|---|---|
 | GET/POST | `/api/repos` | list / register (branch, release_date, interval_days) |
 | GET/PUT/DELETE | `/api/repos/{id}` | PUT release_date → instant re-flag |
-| POST | `/api/repos/{id}/scan` | queue a scan (202) |
+| POST | `/api/repos/{id}/scan` | queue a scan (202, with `queue_position`). A branch already queued or running isn't queued again: `merged: true` |
 | GET | `/api/repos/{id}/scan-status` | live scan phase |
 | GET | `/api/repos/{id}/scan-log` | activity trace (live current run; `?ts=` for a past snapshot's trace) |
 | GET | `/api/repos/{id}/snapshots` | history timeline |
@@ -208,6 +212,7 @@ to run against Postgres (tables are truncated between tests — use a scratch DB
 | GET | `/api/repos/{id}/snapshots/{ts}/report.csv` | CSV export (built on request) |
 | GET | `/api/repos/{id}/diff?from=&to=` | status changes between snapshots |
 | GET/PUT | `/api/settings` | the active workspace's settings (AI research on/off, AI provider, model, search provider) plus which secrets are set. Admins and Owners also see each secret's hint |
+| GET | `/api/limits` | the active workspace's limits and what it uses now (public mode) |
 | POST | `/api/settings/ai-test` | Test connection: `{provider, base_url?, api_key?}` → the provider's models, or why it refused (`ok: false`, a `kind` and a message). Uses the typed key, else the saved one. Costs no tokens |
 | PUT/DELETE | `/api/secrets/{name}` | save or remove a workspace secret: `ai_api_key`, `search_api_key`, `github_token`, `gitlab_token`. Write-only: values are never returned |
 | GET/DELETE | `/api/me` | the caller, their active workspace, their role and permissions there, and their workspaces; DELETE deletes the account (public mode) |
@@ -225,6 +230,8 @@ to run against Postgres (tables are truncated between tests — use a scratch DB
 | GET | `/api/admin/users` | platform admin: every user |
 | PUT/DELETE | `/api/admin/users/{id}` | platform admin: disable or enable (`{"status": "disabled"}` also signs them out); delete |
 | GET | `/api/admin/workspaces`, `/api/admin/workspaces/{id}` | platform admin: every workspace with member and repo counts; one workspace's members and repos (metadata only, and recorded in that workspace's audit log) |
+| GET/PUT | `/api/admin/limits` | platform admin: the limits every workspace gets |
+| GET/PUT | `/api/admin/workspaces/{id}/limits` | platform admin: one workspace's own limits (`null` = the platform's value), with its usage. Recorded in that workspace's audit log |
 | GET | `/api/info` | open to anyone: the mode, and the operator's name and contact |
 | GET | `/api/auth/github/login?next=/page`, `/api/auth/github/callback` | Sign in with GitHub (public mode), returning to `next` (a path on this site). A failed sign-in lands on `/login?error=` `cancelled`, `expired`, `github`, `disabled` or `full` |
 | POST | `/api/auth/logout` | end the session |
@@ -242,6 +249,23 @@ Each route needs a role in the workspace it touches (for `/api/repos/{id}`, the 
 | Owner | also make, change or remove Owners; rename, transfer or delete the workspace |
 
 The last Owner can't leave, step down or be removed. A personal workspace belongs to its account alone: it takes no invites, and deleting the account deletes it. Deleting an account also deletes any team workspace its user was the only member of. In the local mode the built-in user is the Owner of everything.
+
+### Limits and upkeep (public mode)
+The platform admin sets these for everyone (Admin, then Limits) and can give a workspace its own values. A workspace's members see their usage in Settings.
+
+| Limit | Default |
+|---|---|
+| Team workspaces a user can create | 3 |
+| Members per workspace (with pending invites) | 10 |
+| Repositories per workspace | 10 |
+| Branches or versions per repository | 3 |
+| Shortest scan interval | 1 day |
+| Manual scans per workspace per hour | 10 |
+| Zip size, packed / unpacked | 50 MB / 500 MB |
+| Upload storage per workspace | 200 MB |
+| Scans kept per branch | 30 (older ones are deleted daily) |
+
+Scans wait in a queue: `SCAN_WORKERS` run at once, one per workspace, and workspaces take turns. When nobody in a workspace has used the service for 30 days, its scheduled scans pause until a member comes back. The local mode has no limits, pausing or deletion of history.
 
 ## Milestone status
 - **M0 skeleton — done**: storage/config/models, flag engine, deterministic

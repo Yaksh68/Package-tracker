@@ -13,7 +13,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
-from .. import accounts, audit, rbac, storage
+from .. import accounts, audit, limits, rbac, storage
 from ..auth import Principal, get_principal
 from ..models import LOCAL_USER_ID
 from .common import delete_user_everything
@@ -65,6 +65,51 @@ def delete_user(user_id: str, me: Principal = Depends(get_principal)) -> Respons
     audit.record("admin.user_delete", workspace_id=None, actor=me, actor_kind="platform_admin",
                  target_type="user", target_id=user.id, login=user.login)
     return Response(status_code=204)
+
+
+@router.get("/limits")
+def platform_limits(me: Principal = Depends(get_principal)) -> dict:
+    """The limits every workspace gets, unless it has an override."""
+    return {"limits": limits.platform(), "defaults": limits.DEFAULTS, "labels": limits.LABELS}
+
+
+@router.put("/limits")
+def set_platform_limits(body: dict[str, int], me: Principal = Depends(get_principal)) -> dict:
+    before = limits.platform()
+    try:
+        after = limits.set_platform(body)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    changed = {k: f"{before[k]} → {v}" for k, v in after.items() if before[k] != v}
+    if changed:
+        audit.record("admin.limits", workspace_id=None, actor=me, actor_kind="platform_admin",
+                     target_type="platform", **changed)
+    return {"limits": after, "defaults": limits.DEFAULTS, "labels": limits.LABELS}
+
+
+@router.get("/workspaces/{workspace_id}/limits")
+def workspace_limits(workspace_id: str, me: Principal = Depends(get_principal)) -> dict:
+    if accounts.get_workspace(workspace_id) is None:
+        raise HTTPException(404, "workspace not found")
+    return {"overrides": limits.overrides(workspace_id), "effective": limits.effective(workspace_id),
+            "usage": limits.usage(workspace_id), "labels": limits.LABELS}
+
+
+@router.put("/workspaces/{workspace_id}/limits")
+def set_workspace_limits(workspace_id: str, body: dict[str, int | None],
+                         me: Principal = Depends(get_principal)) -> dict:
+    """Override limits for one workspace; null puts a limit back to the
+    platform's value. Recorded in that workspace's audit log."""
+    if accounts.get_workspace(workspace_id) is None:
+        raise HTTPException(404, "workspace not found")
+    try:
+        limits.set_overrides(workspace_id, body)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    audit.record("admin.limits", workspace_id=workspace_id, actor=me, actor_kind="platform_admin",
+                 target_type="workspace", target_id=workspace_id,
+                 **{k: ("platform value" if v is None else v) for k, v in body.items()})
+    return workspace_limits(workspace_id, me)
 
 
 @router.get("/workspaces")

@@ -26,7 +26,8 @@ from .models import LOCAL_WORKSPACE_ID
 
 _BOOL_KEYS = {"use_enrichment_agent", "use_extraction_agent"}
 _TEXT_KEYS = {"ai_provider", "ai_model", "ai_base_url", "search_provider"}
-_EDITABLE = _BOOL_KEYS | _TEXT_KEYS
+_INT_KEYS = {"ai_reuse_days": (0, 90)}  # name: (lowest, highest)
+_EDITABLE = _BOOL_KEYS | _TEXT_KEYS | set(_INT_KEYS)
 AI_PROVIDERS = ("", "claude-cli", "anthropic", *PRESET_BASE_URLS, "openai-compatible")
 SEARCH_PROVIDERS = ("", "tavily", "exa")
 
@@ -43,9 +44,11 @@ def defaults(workspace_id: str) -> dict:
             "use_extraction_agent": env.use_extraction_agent,
             "ai_provider": env.ai_provider, "ai_model": env.ai_model,
             "ai_base_url": env.ai_base_url, "search_provider": env.search_provider,
+            "ai_reuse_days": env.ai_reuse_days,
         }
     return {"use_enrichment_agent": False, "use_extraction_agent": False,
-            "ai_provider": "", "ai_model": "", "ai_base_url": "", "search_provider": ""}
+            "ai_provider": "", "ai_model": "", "ai_base_url": "", "search_provider": "",
+            "ai_reuse_days": 7}
 
 
 def get_runtime_settings(workspace_id: str | None = None) -> dict:
@@ -59,6 +62,12 @@ def _clean(patch: dict) -> dict:
     out = {}
     for k, v in patch.items():
         if v is None or k not in _EDITABLE:
+            continue
+        if k in _INT_KEYS:
+            low, high = _INT_KEYS[k]
+            if isinstance(v, bool) or not isinstance(v, int) or not low <= v <= high:
+                raise ValueError(f"{k} must be a whole number from {low} to {high}")
+            out[k] = v
             continue
         out[k] = bool(v) if k in _BOOL_KEYS else str(v).strip()
     provider = out.get("ai_provider")

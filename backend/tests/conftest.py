@@ -20,12 +20,15 @@ def _isolated_db(monkeypatch):
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret-key-for-the-test-suite")
     monkeypatch.setenv("LOCAL_SECRET_KEY_FILE", f"{tmp}/secret.key")
 
-    from app import crypto, db
+    from app import crypto, db, ratelimit
     from app.config import get_settings
     from app.db_models import Base
 
     get_settings.cache_clear()
     crypto.reset()
+    # every TestClient comes from the same address: don't let one test's
+    # requests count against the next one's rate limits
+    ratelimit.reset()
     db.reset_engine()
     engine = db.get_engine()
     if url.startswith("sqlite"):

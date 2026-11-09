@@ -67,14 +67,18 @@ function BranchRow({ repoId, info }: { repoId: string; info: BranchInfo }) {
       <Space direction="vertical" size={6} style={{ width: "100%" }}>
         <Space size={10} wrap>
           <Typography.Text strong>{info.branch}</Typography.Text>
-          <ScanStatusPill state={info.scan_state} />
+          <ScanStatusPill state={info.scan_state} position={info.queue_position} />
           {info.degraded && info.scan_state !== "error" && (
             <Tooltip title={degradedDetail(info)}>
               <Tag color="gold" icon={<WarningOutlined />}>incomplete</Tag>
             </Tooltip>
           )}
         </Space>
-        <FlagCounts counts={info.flag_counts} empty={isActive(info.scan_state) ? "first scan running" : "no scan yet"} />
+        <FlagCounts
+          counts={info.flag_counts}
+          empty={info.scan_state === "queued" ? "first scan queued"
+            : info.scan_state === "running" ? "first scan running" : "no scan yet"}
+        />
         <Typography.Text type="secondary" style={{ fontSize: 13 }}>
           <Tooltip title={`Last scan: ${fmtDateTime(info.last_scan)}`}>
             <span>Scanned {info.last_scan ? fmtRelative(info.last_scan) : "never"}</span>
@@ -118,6 +122,49 @@ function cacheRepo(qc: QueryClient, repo: Repo, state: string) {
     };
     return prev ? old.map((r) => (r.id === repo.id ? next : r)) : [...old, next];
   });
+}
+
+/** Scheduled scans paused because nobody used the workspace for 30 days:
+ *  shown until dismissed (per browser), for two weeks after they resume. */
+function PauseNotice() {
+  const { me } = useSession();
+  const notice = me.scans_paused;
+  const key = notice ? `packages-tracker.pause-notice.${me.workspace_id}.${notice.resumed_at ?? "paused"}` : "";
+  const [dismissed, setDismissed] = useState(() => {
+    try {
+      return !!key && localStorage.getItem(key) === "1";
+    } catch {
+      return false;
+    }
+  });
+  if (!notice || dismissed) return null;
+  const dismiss = () => {
+    setDismissed(true);
+    try {
+      localStorage.setItem(key, "1");
+    } catch {
+      /* storage blocked: it just comes back on reload */
+    }
+  };
+  return notice.resumed_at ? (
+    <Alert
+      type="info"
+      showIcon
+      closable
+      onClose={dismiss}
+      style={{ marginBottom: 16 }}
+      message="Scheduled scans are running again"
+      description={`They were paused from ${fmtDate(notice.paused_at)} to ${fmtDate(notice.resumed_at)}, because nobody in this workspace had used Packages Tracker for 30 days. Overdue branches are being scanned now.`}
+    />
+  ) : (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: 16 }}
+      message="Scheduled scans are paused"
+      description={`Nobody in this workspace had used Packages Tracker for 30 days, so scheduled scans stopped on ${fmtDate(notice.paused_at)}. They resume when a member signs in.`}
+    />
+  );
 }
 
 export function RepoList() {
@@ -223,6 +270,7 @@ export function RepoList() {
         </Typography.Title>
         {addButton}
       </Space>
+      <PauseNotice />
 
       {reposQuery.isError ? (
         <Alert

@@ -97,6 +97,13 @@ class Enrichment(BaseModel):
     summary: str = ""
     sources: list[Source] = Field(default_factory=list)
     ai_checked: bool = False  # has the AI research pass already examined this?
+    # The AI's own answer as merged (an AiVerdict), kept apart from the merged
+    # fields so a later scan can apply it again on fresh structured data
+    # (AI verdict reuse, phase 4).
+    ai_result: dict | None = None
+    # When this scan reused that answer instead of researching again: the
+    # snapshot it came from.
+    ai_reused_from: str | None = None
 
     @property
     def key(self) -> str:
@@ -439,6 +446,8 @@ class ScanStatus(BaseModel):
     # stays as the single-line summary for compact call sites.
     degraded: bool = False
     issues: list[ScanIssue] = Field(default_factory=list)
+    # while queued: 1 = next to start (scan_queue.py)
+    queue_position: int | None = None
 
 
 class LogEntry(BaseModel):

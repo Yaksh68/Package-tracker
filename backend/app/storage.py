@@ -283,6 +283,51 @@ def upsert_index_entry(repo_id: str, branch: str, summary: SnapshotSummary) -> N
         _apply_summary(_snapshot(s, repo_id, branch, summary.ts, create=True), summary)
 
 
+def recent_ai_results(workspace_id: str, names: list[str], since: datetime) -> list[tuple[str, dict]]:
+    """Findings with an AI answer (`ai_result`) for these package names, from
+    the workspace's listed scans since `since`, newest first, as
+    (snapshot ts, enrichment). The caller matches ecosystem and version."""
+    lowered = sorted({n.lower() for n in names})
+    out: list[tuple[str, dict]] = []
+    with session() as s:
+        for i in range(0, len(lowered), 500):  # keep each IN (...) small
+            rows = s.execute(
+                select(SnapshotRow.created_at, SnapshotRow.ts, EnrichmentRow.data)
+                .join(SnapshotRow, SnapshotRow.id == EnrichmentRow.snapshot_id)
+                .join(RepoRow, RepoRow.id == SnapshotRow.repo_id)
+                .where(RepoRow.workspace_id == workspace_id, SnapshotRow.indexed,
+                       SnapshotRow.created_at >= since,
+                       func.lower(EnrichmentRow.name).in_(lowered[i:i + 500]))
+            ).all()
+            out.extend((created, ts, data) for created, ts, data in rows
+                       if isinstance(data, dict) and data.get("ai_result"))
+    out.sort(key=lambda r: _utc(r[0]), reverse=True)
+    return [(ts, data) for _, ts, data in out]
+
+
+def snapshot_branches() -> list[tuple[str, str]]:
+    """Every (repo_id, branch) that has history."""
+    with session() as s:
+        return [tuple(r) for r in s.execute(select(SnapshotRow.repo_id, SnapshotRow.branch).distinct())]
+
+
+def prune_snapshots(repo_id: str, branch: str, keep: int) -> int:
+    """Keep the branch's newest `keep` listed snapshots (at least one); delete
+    older ones, and unlisted traces (failed scans) older than the oldest kept.
+    Their packages, findings and logs go with them. Returns how many went."""
+    keep = max(1, keep)
+    with session() as s:
+        listed = list(s.scalars(select(SnapshotRow.ts).where(
+            SnapshotRow.repo_id == repo_id, SnapshotRow.branch == branch, SnapshotRow.indexed)
+            .order_by(SnapshotRow.ts.desc()).limit(keep)))
+        if len(listed) < keep:
+            return 0
+        # ts sorts as time (2026-07-13T10-30-00Z); everything before the oldest kept goes
+        return s.execute(delete(SnapshotRow).where(
+            SnapshotRow.repo_id == repo_id, SnapshotRow.branch == branch,
+            SnapshotRow.ts < listed[-1])).rowcount or 0
+
+
 def latest_snapshot_ts(repo_id: str, branch: str) -> str | None:
     with session() as s:
         return s.scalar(select(SnapshotRow.ts).where(

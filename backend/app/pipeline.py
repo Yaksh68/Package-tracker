@@ -13,7 +13,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from . import flags, scan_context, scanlog, settings_store, storage, uploads
+from . import flags, limits, scan_context, scanlog, settings_store, storage, uploads
 from .agents import apt_index, enrichment_agent, extraction_agent, image_inspect, source_apis
 from .agents.clone import CloneError, shallow_clone
 from .agents.image_inspect import ImageInspectError
@@ -109,15 +109,28 @@ def is_scanning(repo_id: str, branch: str) -> bool:
     return _lock(repo_id, branch).locked()
 
 
+def mark_queued(repo_id: str, branch: str) -> None:
+    """Waiting in the scan queue (scan_queue.py)."""
+    _set(repo_id, branch, state=ScanState.queued, phase="", message="")
+
+
+def mark_idle(repo_id: str, branch: str) -> None:
+    """A queued scan that won't run after all (its repo or branch went away)."""
+    if get_status(repo_id, branch).state == ScanState.queued:
+        _set(repo_id, branch, state=ScanState.idle, phase="")
+
+
 async def run_scan(
     repo: Repo,
     branch: str,
     *,
     use_extraction_agent: bool | None = None,
     trigger: str = "manual",
+    queued_at: datetime | None = None,
 ) -> ScanStatus:
     """Scan one branch. `trigger` says why it ran: scheduled, manual, initial
-    (first scan after the repo was added) or upload."""
+    (first scan after the repo was added) or upload. `queued_at`: when it
+    joined the scan queue, if it waited in one."""
     lock = _lock(repo.id, branch)
     if lock.locked():
         return get_status(repo.id, branch)  # overlap guard: skip if already running
@@ -174,7 +187,9 @@ async def run_scan(
                 # request (including the repo list the UI refetches right after
                 # POST /repos) stalls until the scan's I/O finishes.
                 if repo.source == "upload":
-                    clone = await asyncio.to_thread(uploads.unpack, repo.id, branch)
+                    clone = await asyncio.to_thread(
+                        uploads.unpack, repo.id, branch,
+                        max_unpacked_mb=limits.value("unpacked_mb", repo.workspace_id))
                     done_msg = f"Unpacked uploaded zip for version {branch} in {_since(t0)}s"
                 else:
                     clone = await asyncio.to_thread(
@@ -418,7 +433,7 @@ async def run_scan(
             except Exception:  # noqa: BLE001
                 pass
             _record_run(
-                repo, branch, ts, trigger=trigger, started_at=started_at,
+                repo, branch, ts, trigger=trigger, started_at=started_at, queued_at=queued_at,
                 stage_seconds=stage_seconds, packages=packages, flag_counts=counts,
                 ai=ai, upstream_errors=upstream_errors,
             )
@@ -433,6 +448,7 @@ def _record_run(
     *,
     trigger: str,
     started_at: datetime,
+    queued_at: datetime | None = None,
     stage_seconds: dict[str, float],
     packages: list[Package],
     flag_counts: dict[str, int],
@@ -452,6 +468,7 @@ def _record_run(
             branch=branch,
             snapshot_ts=None if outcome == "error" else ts,
             triggered_by=trigger,
+            queued_at=queued_at,
             started_at=started_at,
             finished_at=st.finished_at or datetime.now(timezone.utc),
             outcome=outcome,

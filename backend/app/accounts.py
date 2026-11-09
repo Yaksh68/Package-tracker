@@ -11,6 +11,7 @@ import logging
 import secrets as _secrets
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from typing import Callable
 
 from sqlalchemy import delete, func, select, update
 
@@ -376,11 +377,20 @@ def revoke_invite(workspace_id: str, invite_id: str) -> bool:
             InviteRow.status == "pending").values(status="revoked", responded_at=_now())).rowcount)
 
 
-def _join(s, row: InviteRow, user: User) -> None:
+def _join(s, row: InviteRow, user: User, member_limit: int | None = None) -> None:
     """Add the user with the invite's role; an existing member keeps the
-    higher of the two roles."""
+    higher of the two roles. `member_limit`: the workspace's limit on members
+    (limits.py), checked for newcomers only."""
     from .rbac import rank  # (rbac imports auth, which imports this module)
     m = s.get(MembershipRow, (row.workspace_id, user.id))
+    if m is None and member_limit is not None:
+        members = s.scalar(select(func.count()).select_from(MembershipRow).where(
+            MembershipRow.workspace_id == row.workspace_id)) or 0
+        if members >= member_limit:
+            record_event("limit_hit", workspace_id=row.workspace_id, user_id=user.id,
+                         limit="members_per_workspace")
+            raise InviteError(f"This workspace already has {members} members, the most it can have. "
+                              "Ask its admins to make room.", 409)
     if m is None:
         s.add(MembershipRow(workspace_id=row.workspace_id, user_id=user.id, role=row.role,
                             created_at=_now()))
@@ -388,7 +398,8 @@ def _join(s, row: InviteRow, user: User) -> None:
         m.role = row.role
 
 
-def respond_to_invite(invite_id: str, user: User, *, accept: bool) -> dict:
+def respond_to_invite(invite_id: str, user: User, *, accept: bool,
+                      member_limit: Callable[[str], int | None] | None = None) -> dict:
     """Accept or decline a login invite addressed to `user`. Returns the invite."""
     now = _now()
     with session() as s:
@@ -398,13 +409,14 @@ def respond_to_invite(invite_id: str, user: User, *, accept: bool) -> dict:
         if row.status != "pending" or _utc(row.expires_at) <= now:
             raise InviteError("this invite has expired or was already used", 410)
         if accept:
-            _join(s, row, user)
+            _join(s, row, user, member_limit(row.workspace_id) if member_limit else None)
         row.status = "accepted" if accept else "declined"
         row.responded_by, row.responded_at = user.id, now
         return _invite(row)
 
 
-def accept_invite_link(token: str, user: User) -> dict:
+def accept_invite_link(token: str, user: User, *,
+                       member_limit: Callable[[str], int | None] | None = None) -> dict:
     """Use a one-time link: join its workspace with its role. Single use."""
     now = _now()
     with session() as s:
@@ -414,7 +426,7 @@ def accept_invite_link(token: str, user: User) -> dict:
             raise InviteError("invite not found")
         if row.status != "pending" or _utc(row.expires_at) <= now:
             raise InviteError("this invite link has expired or was already used", 410)
-        _join(s, row, user)
+        _join(s, row, user, member_limit(row.workspace_id) if member_limit else None)
         row.status = "accepted"
         row.responded_by, row.responded_at = user.id, now
         return _invite(row)
@@ -536,10 +548,12 @@ def secret_hints(workspace_id: str) -> dict[str, dict]:
 _active: set[tuple[str, date]] = set()  # in-process: one write per user per day
 
 
-def touch_activity(user_id: str) -> None:
+def touch_activity(user_id: str) -> bool:
+    """Record that the user is here today. True the first time today (in
+    this process), when it was written down."""
     today = _now().date()
     if (user_id, today) in _active:
-        return
+        return False
     try:
         with session() as s:
             s.execute(_insert(UserActivityDayRow).values(user_id=user_id, day=today)
@@ -547,10 +561,11 @@ def touch_activity(user_id: str) -> None:
             s.execute(update(UserRow).where(UserRow.id == user_id).values(last_seen_at=_now()))
     except Exception:  # noqa: BLE001
         log.exception("could not record activity for %s", user_id)
-        return
+        return False
     if len(_active) > 10_000:
         _active.clear()
     _active.add((user_id, today))
+    return True
 
 
 def record_event(event: str, *, workspace_id: str | None = None, user_id: str | None = None,

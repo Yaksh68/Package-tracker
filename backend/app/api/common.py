@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from .. import accounts, scanlog, scheduler, storage, uploads
+from .. import accounts, scan_queue, scanlog, scheduler, storage, uploads
 from ..pipeline import clear_repo_state, is_scanning
 
 
@@ -13,6 +13,7 @@ def forget_repo(repo_id: str) -> None:
     and in-memory scan state."""
     storage.delete_repo(repo_id)
     scheduler.unsync_repo(repo_id)      # stop every branch's interval job
+    scan_queue.cancel_repo(repo_id)     # and any scan still waiting for a worker
     uploads.delete(repo_id)             # uploaded zips, if any
     clear_repo_state(repo_id)           # drop in-memory scan status + lock (all branches)
     scanlog.clear_repo(repo_id)         # drop in-memory activity trace (all branches)

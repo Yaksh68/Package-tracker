@@ -1,6 +1,6 @@
 # Cloud deployment: public multi-user Packages Tracker (implementation plan)
 
-> **Status:** Phases 0 and 1 are merged (2026-11-07), and so are 2a and 2b (2026-11-08). Phase 3 is done on `phase-3-ui` (2026-11-08). Each phase ships as its own branch and pull request.
+> **Status:** Phases 0 and 1 are merged (2026-11-07), and so are 2a, 2b and 3 (2026-11-08). Phase 4 is done on `phase-4-limits` (2026-11-08). Each phase ships as its own branch and pull request.
 >
 > **Decisions locked (2026-11-07):**
 > 1. **Public multi-user service.** People sign in, work in **workspaces** (teams), and bring their own AI keys.
@@ -402,6 +402,33 @@ Done 2026-11-08: 405 backend tests pass, 33 of them new in `test_rbac.py`.
 **4.6 Rate limits** on sign-in and on the API, per IP address and per user, kept in memory.
 
 **Tests:** queue fairness and merging of duplicates, each limit, verdict reuse, retention, and pausing and resuming.
+
+**Phase 4 as built (2026-11-08):**
+- **Queue** (`scan_queue.py`):
+  - In the local mode, the single workspace may use every worker.
+  - A scan request for a branch that's already queued or running gets a 202 that says it was merged; it no longer gets a 409.
+  - The queue is in memory: a restart drops it, and scheduled scans come back as catch-ups.
+  - The status pill says "Queued · 3rd in line".
+- **Limits** (`limits.py`):
+  - Members count pending invites, and acceptance is checked again.
+  - Upload storage is checked before a new zip replaces the old one, which stays if the new one is refused.
+  - Each refusal is a `limit_hit` usage event.
+  - The UI has a usage card in Settings, a Limits tab in Admin, and per-workspace values in the workspace drawer.
+- **Verdict reuse:**
+  - Each finding keeps the AI's own answer (`ai_result`), and reuse re-applies it on fresh structured data.
+  - It never crosses workspaces, and reused findings are labelled in the citations drawer.
+- **Retention** also deletes failed scans' traces older than the oldest scan kept.
+- **Inactive workspaces:**
+  - A member's first request of the day resumes their paused workspaces, and overdue branches catch up at once.
+  - Pause and resume are both in the audit log.
+- **Rate limits** (`ratelimit.py`), per minute:
+  - sign-in: 10 per address;
+  - API: 300 per session, plus a ceiling of 600 per address;
+  - calls without a session: 60 per address.
+  The answer is a 429 with `Retry-After`. Addresses are counted in memory only.
+- **Also:**
+  - package lookups run 6 at a time (`LOOKUP_CONCURRENCY`), which addresses the 20-minute scan seen in Phase 3;
+  - `sync_all` no longer removes the scheduler's non-scan jobs.
 
 ---
 

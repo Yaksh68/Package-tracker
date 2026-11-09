@@ -19,7 +19,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
-from .. import accounts, audit, rbac
+from .. import accounts, audit, limits, rbac
 from ..auth import Principal, get_principal
 from ..config import get_settings
 from .common import delete_workspace_everything
@@ -67,6 +67,10 @@ def _not_personal(workspace_id: str, message: str) -> None:
 _PERSONAL = "a personal workspace is just yours: create a team workspace to work with others"
 
 
+def _member_limit(workspace_id: str) -> int | None:
+    return limits.value("members_per_workspace", workspace_id)
+
+
 def _audit(me: Principal, action: str, workspace_id: str | None, **kw) -> None:
     audit.record(action, workspace_id=workspace_id, actor=me, **kw)
 
@@ -82,6 +86,8 @@ def list_workspaces(me: Principal = Depends(get_principal)) -> list[dict]:
 @router.post("/workspaces", status_code=201)
 def create_workspace(body: NameBody, me: Principal = Depends(get_principal)) -> dict:
     _public_only()
+    limits.check_count("workspaces_per_user", used=limits.team_workspaces_created(me.user.id),
+                       workspace_id=None, user_id=me.user.id)
     ws = accounts.create_workspace(body.name.strip(), me.user.id)
     _audit(me, "workspace.create", ws.id, target_type="workspace", target_id=ws.id, name=ws.name)
     accounts.record_event("workspace_created", workspace_id=ws.id, user_id=me.user.id)
@@ -200,6 +206,9 @@ def create_invite(workspace_id: str, body: InviteBody, me: Principal = Depends(g
     login = (body.github_login or "").strip() or None
     if login and not _GITHUB_LOGIN.match(login):
         raise HTTPException(422, "that isn't a valid GitHub username")
+    limits.check_count("members_per_workspace",
+                       used=len(accounts.workspace_members(workspace_id)) + len(accounts.workspace_invites(workspace_id)),
+                       workspace_id=workspace_id, user_id=me.user.id)
     invite, token = accounts.create_invite(workspace_id, body.role, by=me.user.id, github_login=login)
     if token:  # shown this once; only its hash is stored
         invite["url"] = f"{get_settings().public_base_url.rstrip('/')}/invite/{token}"
@@ -230,7 +239,7 @@ def my_invites(me: Principal = Depends(get_principal)) -> list[dict]:
 def _respond(invite_id: str, me: Principal, accept: bool) -> dict:
     _public_only()
     try:
-        invite = accounts.respond_to_invite(invite_id, me.user, accept=accept)
+        invite = accounts.respond_to_invite(invite_id, me.user, accept=accept, member_limit=_member_limit)
     except accounts.InviteError as e:
         raise HTTPException(e.status, str(e)) from e
     _audit(me, "invite.accept" if accept else "invite.decline", invite["workspace_id"],
@@ -254,7 +263,7 @@ def decline_invite(invite_id: str, me: Principal = Depends(get_principal)) -> di
 def accept_invite_link(body: LinkBody, me: Principal = Depends(get_principal)) -> dict:
     _public_only()
     try:
-        invite = accounts.accept_invite_link(body.token, me.user)
+        invite = accounts.accept_invite_link(body.token, me.user, member_limit=_member_limit)
     except accounts.InviteError as e:
         raise HTTPException(e.status, str(e)) from e
     _audit(me, "invite.accept", invite["workspace_id"], target_type="invite",

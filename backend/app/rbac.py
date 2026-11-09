@@ -90,6 +90,7 @@ ROUTE_PERMS: dict[tuple[str, str], Perm | str] = {
     ("GET", "/api/settings"): Perm.VIEW,
     ("PUT", "/api/settings"): Perm.SETTINGS,
     ("POST", "/api/settings/ai-test"): Perm.SETTINGS,
+    ("GET", "/api/limits"): Perm.VIEW,
     ("PUT", "/api/secrets/{name}"): Perm.SECRETS,
     ("DELETE", "/api/secrets/{name}"): Perm.SECRETS,
     # repos (the active workspace's, or the repo's own)
@@ -131,6 +132,10 @@ ROUTE_PERMS: dict[tuple[str, str], Perm | str] = {
     ("DELETE", "/api/admin/users/{user_id}"): PLATFORM_ADMIN,
     ("GET", "/api/admin/workspaces"): PLATFORM_ADMIN,
     ("GET", "/api/admin/workspaces/{workspace_id}"): PLATFORM_ADMIN,
+    ("GET", "/api/admin/limits"): PLATFORM_ADMIN,
+    ("PUT", "/api/admin/limits"): PLATFORM_ADMIN,
+    ("GET", "/api/admin/workspaces/{workspace_id}/limits"): PLATFORM_ADMIN,
+    ("PUT", "/api/admin/workspaces/{workspace_id}/limits"): PLATFORM_ADMIN,
 }
 
 

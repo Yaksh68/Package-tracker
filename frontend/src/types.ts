@@ -19,6 +19,8 @@ export interface BranchInfo {
   degraded?: boolean;
   /** Detail behind `degraded` — in-memory, so empty after a backend restart. */
   issues?: ScanIssue[];
+  /** While queued: 1 = next to start. */
+  queue_position?: number | null;
 }
 
 export interface Repo {
@@ -122,6 +124,8 @@ export interface Component {
   confidence: string | null;
   summary: string | null;
   ai_researched?: boolean;
+  /** The snapshot whose AI finding this scan reused instead of asking again. */
+  ai_reused_from?: string | null;
   sources: CitationSource[];
   flag: string | null;
   reasons: string[];
@@ -138,6 +142,16 @@ export interface ScanStatus {
   snapshot_ts: string | null;
   degraded: boolean;
   issues: ScanIssue[];
+  /** While queued: 1 = next to start. */
+  queue_position?: number | null;
+}
+
+/** POST /repos/{id}/scan. `merged`: that branch was already queued or
+ *  running, so no new scan was added. */
+export interface ScanRequest {
+  status: "queued" | "running";
+  merged: boolean;
+  queue_position: number | null;
 }
 
 export interface LogEntry {
@@ -212,6 +226,8 @@ export interface Me {
   /** What each role may do (the server's table). */
   role_permissions: Record<Role, Perm[]>;
   workspaces: Workspace[];
+  /** Scheduled scans paused for inactivity: now (resumed_at null) or until recently. */
+  scans_paused?: { paused_at: string; resumed_at: string | null } | null;
 }
 
 /** GET /api/info: what anyone may know, signed in or not. */
@@ -272,6 +288,8 @@ export interface WorkspaceSettings {
   ai_model: string;
   ai_base_url: string;
   search_provider: string;
+  /** Reuse AI findings from this workspace's scans of the last N days (0 = off). */
+  ai_reuse_days: number;
   secrets: Record<SecretName, SecretHint>;
 }
 
@@ -298,6 +316,33 @@ export interface AdminWorkspace {
   created_at: string;
   members: number;
   repos: number;
+}
+
+/** Limit name → value, e.g. { repos_per_workspace: 10 }. */
+export type LimitValues = Record<string, number>;
+
+/** GET /api/limits: the active workspace's limits (public mode only). */
+export interface WorkspaceLimits {
+  enabled: boolean;
+  limits?: LimitValues;
+  /** What it uses now, for the limits it can run into. */
+  usage?: Record<string, number>;
+  labels?: Record<string, string>;
+}
+
+/** GET/PUT /api/admin/limits */
+export interface PlatformLimits {
+  limits: LimitValues;
+  defaults: LimitValues;
+  labels: Record<string, string>;
+}
+
+/** GET/PUT /api/admin/workspaces/{id}/limits */
+export interface AdminWorkspaceLimits {
+  overrides: LimitValues;
+  effective: LimitValues;
+  usage: Record<string, number>;
+  labels: Record<string, string>;
 }
 
 export interface AdminWorkspaceDetail {

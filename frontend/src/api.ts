@@ -2,6 +2,10 @@ import type {
   AdminUser,
   AdminWorkspace,
   AdminWorkspaceDetail,
+  AdminWorkspaceLimits,
+  LimitValues,
+  PlatformLimits,
+  WorkspaceLimits,
   AiTestResult,
   AuditEvent,
   Component,
@@ -14,6 +18,7 @@ import type {
   RepoUpdate,
   Role,
   ScanLog,
+  ScanRequest,
   SecretHint,
   SecretName,
   ServiceInfo,
@@ -211,6 +216,16 @@ export const api = {
   adminDeleteUser: (userId: string) => req<void>(`/api/admin/users/${enc(userId)}`, { method: "DELETE" }),
   adminWorkspaces: () => req<AdminWorkspace[]>("/api/admin/workspaces"),
   adminWorkspace: (id: string) => req<AdminWorkspaceDetail>(`/api/admin/workspaces/${enc(id)}`),
+  adminLimits: () => req<PlatformLimits>("/api/admin/limits"),
+  setAdminLimits: (values: LimitValues) =>
+    req<PlatformLimits>("/api/admin/limits", { method: "PUT", ...json(values) }),
+  adminWorkspaceLimits: (id: string) => req<AdminWorkspaceLimits>(`/api/admin/workspaces/${enc(id)}/limits`),
+  /** null puts a limit back to the platform's value. */
+  setAdminWorkspaceLimits: (id: string, values: Record<string, number | null>) =>
+    req<AdminWorkspaceLimits>(`/api/admin/workspaces/${enc(id)}/limits`, { method: "PUT", ...json(values) }),
+
+  // ---- the active workspace's limits ----
+  limits: () => req<WorkspaceLimits>("/api/limits"),
 
   // ---- repos and scans ----
 
@@ -240,7 +255,7 @@ export const api = {
   // Branch names can contain "/" (e.g. release/6.1), so it's always a query
   // param — never a path segment — and URLSearchParams-encoded.
   scanNow: (id: string, branch: string) =>
-    req<{ status: string }>(`/api/repos/${id}/scan?${new URLSearchParams({ branch })}`, { method: "POST" }),
+    req<ScanRequest>(`/api/repos/${id}/scan?${new URLSearchParams({ branch })}`, { method: "POST" }),
   scanStatus: (id: string, branch: string) =>
     req<ScanStatus>(`/api/repos/${id}/scan-status?${new URLSearchParams({ branch })}`),
   scanLog: (id: string, branch: string, ts?: string) =>

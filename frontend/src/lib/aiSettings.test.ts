@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { aiProblems, baseUrlProblem, settingsPatch, type AiFormValues, type SavedAi } from "./aiSettings";
 
 const form = (v: Partial<AiFormValues>): AiFormValues => ({
-  enabled: true, provider: "", model: "", baseUrl: "", searchProvider: "", aiKey: "", searchKey: "", ...v,
+  enabled: true, provider: "", model: "", baseUrl: "", searchProvider: "", reuseDays: 7, aiKey: "", searchKey: "", ...v,
 });
 const nothingSaved: SavedAi = { provider: "", searchProvider: "", aiKey: false, searchKey: false };
 const fields = (v: AiFormValues, saved = nothingSaved, mode: "local" | "github" = "github") =>
@@ -62,7 +62,7 @@ describe("AI settings validation", () => {
 });
 
 describe("the settings patch", () => {
-  const current = { use_enrichment_agent: false, ai_provider: "groq", ai_model: "a", ai_base_url: "", search_provider: "tavily" };
+  const current = { use_enrichment_agent: false, ai_provider: "groq", ai_model: "a", ai_base_url: "", search_provider: "tavily", ai_reuse_days: 7 };
 
   it("sends only what changed", () => {
     const v = form({ enabled: true, provider: "groq", model: "a", searchProvider: "tavily" });
