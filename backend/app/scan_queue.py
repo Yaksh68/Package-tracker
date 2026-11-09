@@ -188,6 +188,13 @@ def position(repo_id: str, branch: str) -> int | None:
     return _queue.position(repo_id, branch) if _queue else None
 
 
+def stats() -> tuple[int, int]:
+    """(waiting, running) right now, for the admin analytics. Safe from any
+    thread: it only reads the sizes."""
+    q = _queue
+    return (q.waiting(), len(q._running)) if q else (0, 0)
+
+
 def busy(repo_id: str, branch: str) -> bool:
     """Queued or running."""
     return (_queue is not None and _queue.queued(repo_id, branch)) or pipeline.is_scanning(repo_id, branch)
