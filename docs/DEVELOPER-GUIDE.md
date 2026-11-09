@@ -91,11 +91,13 @@ packages-tracker/
 │       ├── scheduler.py          # APScheduler: per-repo interval jobs, daily upkeep
 │       ├── limits.py             # per-workspace limits and their checks
 │       ├── housekeeping.py       # retention, pausing inactive workspaces
+│       ├── analytics.py          # the admin analytics: panels, hourly health samples
 │       ├── ratelimit.py          # in-memory rate limits (public mode)
 │       ├── main.py               # FastAPI app + lifespan
 │       ├── api/routes.py         # REST: account, settings, secrets, repos, scans
 │       ├── api/workspaces.py     # REST: workspaces, members, invites, audit log
 │       ├── api/admin.py          # REST: the platform admin
+│       ├── api/analytics.py      # REST: the platform admin's analytics
 │       ├── api/common.py         # deleting a repo, workspace or user with its data
 │       ├── ai/                   # AI providers (Anthropic, OpenAI-compatible), search, pricing
 │       └── agents/
@@ -181,6 +183,8 @@ packages-tracker/
   `workspace_settings`, `secrets` (encrypted), `user_activity_days` and
   `usage_events`. Phase 2b adds `invites` (a GitHub login, or a link's token
   hash) and `audit_events`. `repos.workspace_id` has no foreign key.
+- Phase 6 adds `system_samples`: an hourly reading of the server's health
+  (disk, database size, memory, the scan queue).
 - `position` columns preserve list order exactly as the scan produced it.
   Package keys are **not unique per snapshot** (one package pinned in two
   manifests = two rows with the same key), so nothing is keyed on them.
@@ -354,6 +358,36 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   recorded in that workspace's log as `admin.view_workspace`). No scan results
   or keys.
 
+### `analytics.py`, `api/analytics.py` (Phase 6)
+- `GET /api/admin/analytics/{panel}?start=&end=` is `PLATFORM_ADMIN`. It
+  returns 404 for an unknown panel, and 422 for a backwards range or one over
+  366 days. The default is the last 30 UTC days; the end can't be in the future.
+- `PANELS`:
+  - `overview`: headline tiles, each with the previous period and a 30-day trend;
+  - `growth`;
+  - `activation`: what the range's sign-ups did since, each step counted on its own;
+  - `retention`: 8 weekly cohorts;
+  - `scans`;
+  - `content`: the latest scan in the range of each branch, plus `_common_eol`;
+  - `ai`, `system` and `workspaces`.
+- Each panel selects only the columns it needs and adds them up in Python, so
+  it reads the same on SQLite and Postgres. Results are cached for 5 minutes per
+  panel and range (`clear_cache()` resets the cache in tests). `system` is
+  measured fresh every time.
+- Privacy: totals and metadata only. `_common_eol` names a package only when
+  it's past its end of life in the latest scans of at least
+  `COMMON_MIN_WORKSPACES` (5) workspaces. A workspace's details still come from
+  the audited `/api/admin/workspaces/{id}`.
+- `record_sample()` runs hourly from the scheduler (job `system-sample`). It
+  records:
+  - the data volume's disk use;
+  - the database size (`pg_database_size`, or SQLite's page count);
+  - the app's memory and the host's, from `/proc`, so on Linux only;
+  - the uploads;
+  - `scan_queue.stats()`.
+
+  Samples older than 400 days are dropped.
+
 ### `pipeline.py` (scan orchestration)
 - In-memory state: `_status` (`ScanStatus` keyed by `(repo_id, branch)` tuple),
   `_locks` (asyncio lock per `(repo_id, branch)` = overlap guard — one branch
@@ -442,8 +476,8 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   then starts/stops the scheduler. If Postgres is down, startup fails and
   systemd retries.
 - `app` — FastAPI + CORS (Vite origins, `APP_ENV=dev` only) + `CsrfMiddleware`
-  + `RateLimitMiddleware` + the routers (`auth`, then `routes`, `workspaces`
-  and `admin`, all three behind `rbac.authorize`); `GET /api/health` and the
+  + `RateLimitMiddleware` + the routers (`auth`, then `routes`, `workspaces`,
+  `admin` and `analytics`, all behind `rbac.authorize`); `GET /api/health` and the
   public `GET /api/info`.
 - `serve_ui(app, root)` — with `STATIC_DIR` set (the image sets
   `/app/static`), serves the built UI: its files as they are, `index.html` for
@@ -731,7 +765,7 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   - open to anyone: `/login`, `/privacy`, `/terms`;
   - everything else, behind `SessionGate`: the header and `/`,
     `/repos/:id`, `/repos/:id/activity`, `/repos/:id/history`, `/settings`,
-    `/members`, `/audit`, `/admin` and `/invite/:token`.
+    `/members`, `/audit`, `/admin/:tab?` and `/invite/:token`.
 
   The header has the menu, the workspace switcher, invites for you, the theme
   toggle and the account menu (the last three in the public mode only). The
@@ -810,9 +844,24 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
     invites, and rename, transfer, delete and leave. A personal workspace
     shows how to create a team instead.
   - `Audit` — the workspace's log, paged by "Load older entries".
-  - `Admin` — users, workspaces (the drawer has that workspace's own limits)
-    and the platform's limits, for platform admins only (a 404 page for
-    everyone else, and in the local mode).
+  - `Admin` — for platform admins only (a 404 page for everyone else, and in
+    the local mode). Each tab has its own address (`/admin/analytics`,
+    `/admin/users`, …):
+    - Analytics;
+    - Users;
+    - Workspaces. The drawer, `components/WorkspaceDrawer.tsx`, has that
+      workspace's own limits.
+    - the platform's limits.
+  - `Analytics` (the Admin tab) — loaded only when opened, so Recharts stays
+    out of the main bundle.
+    - One date range above every panel: 7, 30 or 90 days, 12 months, or custom.
+    - `components/charts.tsx` holds the chart pieces: `ChartCard` (a
+      chart/table switch and a CSV download), `StatTile`, `TimeLines`,
+      `DayBars`, `HBars`, `HStack`, `Meter` and `RetentionGrid`.
+    - Colours come from `lib/chartTheme.ts`. The series pair was checked for
+      colour-blind separation on both themes' card surfaces. Status colours
+      appear only with a label.
+    - Formatting, CSV and date ranges are in `lib/analyticsFormat.ts`.
   - `RepoList` also shows `PauseNotice` when the workspace's scheduled scans
     are paused or were until recently (`/api/me` `scans_paused`), and the
     status pill shows a queued scan's place in line.
@@ -927,6 +976,16 @@ cancelling), `test_limits.py` (each limit, overrides, the admin endpoints),
 `test_housekeeping.py` (retention, pausing, resuming), `test_ai_reuse.py`,
 `test_ratelimit.py`, and a concurrency test for the lookups. Frontend:
 `ScanStatusPill.test.ts`.
+
+Phase 6 added:
+- `test_analytics.py`: who can see the analytics, each panel against seeded
+  data with known counts, the 5-workspace threshold, the health samples and
+  the cache.
+- Frontend:
+  - `lib/analyticsFormat.test.ts`: numbers, the change since the previous
+    period, CSV, date ranges and the retention colours;
+  - in `App.test.tsx`: the Analytics tab, and a remembered workspace the user
+    has since left (the app forgets it instead of spinning).
 
 Each test gets a throwaway SQLite DB (schema from the ORM models);
 `TEST_DATABASE_URL=postgresql+psycopg://…` runs them on Postgres instead (via

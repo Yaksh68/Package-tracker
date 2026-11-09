@@ -500,6 +500,13 @@ Done 2026-11-08: 405 backend tests pass, 33 of them new in `test_rbac.py`.
   - the common-EOL panel only shows packages found in 5 or more workspaces;
   - opening a workspace's details is written to the audit log.
 - **Tests:** access control, metric queries checked against test data with known counts, the 5-workspace threshold, and CSV export.
+- **As built:**
+  - The API is one route, `/api/admin/analytics/{panel}`, with nine panels.
+  - Analytics is the first tab of Admin (`/admin/analytics`), loaded only when opened.
+  - The panels compute in Python from narrow selects, the same on SQLite and Postgres.
+  - Memory readings need `/proc`, so they're Linux-only.
+  - The activation steps are each counted on their own, not as a strict funnel.
+  - AI results count answered, couldn't tell, and reused. A verdict's pre-AI value isn't stored, so "how often AI changed a verdict" is how often it answered a package the structured sources couldn't settle.
 
 ---
 
