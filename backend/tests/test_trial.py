@@ -15,7 +15,6 @@ from app.db import session
 from app.db_models import RepoRow, ScanRunRow, UsageEventRow, UserRow
 from app.main import app
 from app.models import ScanRunRecord
-from tests.test_auth import _fake_github, _oauth_sign_in
 
 CSRF = {"X-Requested-With": "packages-tracker"}
 REPO = "https://github.com/acme/app"
@@ -148,15 +147,15 @@ def test_signed_in_users_add_repos_the_usual_way(public, git):
     assert _start(c).status_code == 409
 
 
-def test_signing_in_keeps_the_free_scan(public, git, monkeypatch):
+def test_signing_in_keeps_the_free_scan(public, git, monkeypatch, fake_github, oauth_sign_in):
     c = _visitor()
     repo_id = _start(c).json()["repo_id"]
     guest = c.get("/api/me").json()["user"]["id"]
     storage.write_scan_run(ScanRunRecord(repo_id=repo_id, workspace_id=storage.get_repo(repo_id).workspace_id,
                                          branch="main", started_at=datetime.now(timezone.utc), outcome="done",
                                          triggered_by="trial"))
-    _fake_github(monkeypatch, profile={"id": 42, "login": "octo"})
-    r = _oauth_sign_in(c, next_page=f"/repos/{repo_id}?branch=main")
+    fake_github(profile={"id": 42, "login": "octo"})
+    r = oauth_sign_in(c, next_page=f"/repos/{repo_id}?branch=main")
     assert r.status_code == 302 and r.headers["location"] == f"/repos/{repo_id}?branch=main"
 
     me = c.get("/api/me").json()

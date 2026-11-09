@@ -5,7 +5,6 @@ import io
 import zipfile
 from urllib.parse import parse_qs, urlsplit
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -44,30 +43,6 @@ def _signed_in(github_id: int, login: str):
     return c, user
 
 
-def _fake_github(monkeypatch, *, profile: dict, token: str = "gho_from_github"):
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/login/oauth/access_token":
-            body = parse_qs(request.content.decode())
-            assert body["client_secret"] == ["csecret"] and body["code"] == ["the-code"]
-            return httpx.Response(200, json={"access_token": token, "token_type": "bearer"})
-        if request.url.path == "/user":
-            assert request.headers["authorization"] == f"Bearer {token}"
-            return httpx.Response(200, json=profile)
-        return httpx.Response(404)
-
-    monkeypatch.setattr(auth, "_github_client",
-                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-
-
-def _oauth_sign_in(c: TestClient, next_page: str | None = None):
-    """Run login → callback; returns the callback response."""
-    login = c.get("/api/auth/github/login", params={"next": next_page} if next_page else None,
-                  follow_redirects=False)
-    assert login.status_code == 302
-    state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
-    return c.get(f"/api/auth/github/callback?code=the-code&state={state}", follow_redirects=False)
-
-
 # --------------------------------------------------------------------------- #
 # sign-in                                                                       #
 # --------------------------------------------------------------------------- #
@@ -81,10 +56,10 @@ def test_login_redirects_to_github_with_a_state_cookie(public):
     assert r.cookies.get(auth.STATE_COOKIE) == q["state"][0]
 
 
-def test_sign_in_creates_the_user_a_personal_workspace_and_a_session(public, monkeypatch):
-    _fake_github(monkeypatch, profile={"id": 42, "login": "octo", "name": "Octo Cat"})
+def test_sign_in_creates_the_user_a_personal_workspace_and_a_session(public, monkeypatch, fake_github, oauth_sign_in):
+    fake_github(profile={"id": 42, "login": "octo", "name": "Octo Cat"})
     c = _client()
-    r = _oauth_sign_in(c)
+    r = oauth_sign_in(c)
     assert r.status_code == 302 and r.headers["location"] == "/"
     me = c.get("/api/me").json()
     assert me["mode"] == "github" and me["user"]["login"] == "octo"
@@ -93,8 +68,8 @@ def test_sign_in_creates_the_user_a_personal_workspace_and_a_session(public, mon
         assert s.scalar(select(UserRow.github_token).where(UserRow.github_id == 42)).startswith("enc:v1:")
 
 
-def test_a_wrong_state_is_refused(public, monkeypatch):
-    _fake_github(monkeypatch, profile={"id": 1, "login": "x"})
+def test_a_wrong_state_is_refused(public, monkeypatch, fake_github):
+    fake_github(profile={"id": 1, "login": "x"})
     c = _client()
     c.get("/api/auth/github/login", follow_redirects=False)
     r = c.get("/api/auth/github/callback?code=the-code&state=forged", follow_redirects=False)
@@ -107,48 +82,48 @@ def test_cancelling_on_github_returns_to_the_sign_in_page(public):
     assert r.headers["location"] == "/login?error=cancelled"
 
 
-def test_sign_in_returns_to_the_page_it_started_from(public, monkeypatch):
-    _fake_github(monkeypatch, profile={"id": 77, "login": "invitee"})
-    r = _oauth_sign_in(_client(), "/invite/tok123?x=1")
+def test_sign_in_returns_to_the_page_it_started_from(public, monkeypatch, fake_github, oauth_sign_in):
+    fake_github(profile={"id": 77, "login": "invitee"})
+    r = oauth_sign_in(_client(), "/invite/tok123?x=1")
     assert r.status_code == 302 and r.headers["location"] == "/invite/tok123?x=1"
 
 
 @pytest.mark.parametrize("target", ["//evil.example/x", "https://evil.example", "/api/me",
                                     "/" + chr(92) + "evil.example", "javascript:alert(1)"])
-def test_sign_in_never_returns_off_site(public, monkeypatch, target):
-    _fake_github(monkeypatch, profile={"id": 78, "login": "careful"})
-    assert _oauth_sign_in(_client(), target).headers["location"] == "/"
+def test_sign_in_never_returns_off_site(public, monkeypatch, target, fake_github, oauth_sign_in):
+    fake_github(profile={"id": 78, "login": "careful"})
+    assert oauth_sign_in(_client(), target).headers["location"] == "/"
 
 
-def test_sign_ups_stop_at_the_cap_but_admins_get_in(public, monkeypatch):
+def test_sign_ups_stop_at_the_cap_but_admins_get_in(public, monkeypatch, fake_github, oauth_sign_in):
     monkeypatch.setenv("MAX_USERS", "1")
     get_settings.cache_clear()
     _signed_in(1, "first")
-    _fake_github(monkeypatch, profile={"id": 2, "login": "second"})
-    r = _oauth_sign_in(_client())
+    fake_github(profile={"id": 2, "login": "second"})
+    r = oauth_sign_in(_client())
     assert r.status_code == 302 and r.headers["location"] == "/login?error=full"
-    _fake_github(monkeypatch, profile={"id": 3, "login": "theadmin"})  # case-insensitive match
+    fake_github(profile={"id": 3, "login": "theadmin"})  # case-insensitive match
     c = _client()
-    assert _oauth_sign_in(c).status_code == 302
+    assert oauth_sign_in(c).status_code == 302
     assert c.get("/api/me").json()["user"]["platform_role"] == "admin"
 
 
-def test_an_admin_gets_the_repos_from_before_the_public_mode(public, monkeypatch):
+def test_an_admin_gets_the_repos_from_before_the_public_mode(public, monkeypatch, fake_github, oauth_sign_in):
     storage.upsert_repo(Repo(id="old", url="https://x/old", branches=["main"]))  # local workspace
-    _fake_github(monkeypatch, profile={"id": 9, "login": "TheAdmin"})
+    fake_github(profile={"id": 9, "login": "TheAdmin"})
     c = _client()
-    _oauth_sign_in(c)
+    oauth_sign_in(c)
     ids = [w["id"] for w in c.get("/api/me").json()["workspaces"]]
     assert LOCAL_WORKSPACE_ID in ids
     assert [r["id"] for r in c.get("/api/repos", headers={"X-Workspace": "local"}).json()] == ["old"]
 
 
-def test_disabled_users_lose_their_sessions_and_cant_sign_in(public, monkeypatch):
+def test_disabled_users_lose_their_sessions_and_cant_sign_in(public, monkeypatch, fake_github, oauth_sign_in):
     c, user = _signed_in(5, "gone")
     accounts.set_user_status(user.id, "disabled")
     assert c.get("/api/me").status_code == 401
-    _fake_github(monkeypatch, profile={"id": 5, "login": "gone"})
-    assert _oauth_sign_in(_client()).headers["location"] == "/login?error=disabled"
+    fake_github(profile={"id": 5, "login": "gone"})
+    assert oauth_sign_in(_client()).headers["location"] == "/login?error=disabled"
 
 
 def test_logout_ends_the_session(public):
