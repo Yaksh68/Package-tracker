@@ -7,6 +7,7 @@ import { RepoTabs } from "../components/RepoTabs";
 import { FlagBadge, FlagCounts } from "../components/FlagBadge";
 import { flagRank } from "../flags";
 import { fmtSnapshotTs, repoName } from "../format";
+import { useIsMobile } from "../lib/responsive";
 import type { SnapshotSummary } from "../types";
 
 export function SnapshotHistory() {
@@ -54,6 +55,14 @@ export function SnapshotHistory() {
   });
 
   const opts = snapshots.map((s: SnapshotSummary) => ({ value: s.ts, label: fmtSnapshotTs(s.ts) }));
+  const mobile = useIsMobile();
+  // on a phone the two pickers go in the card body: the header has no room
+  const pickers = (
+    <Space wrap>
+      <Select style={{ width: 240, maxWidth: "calc(100vw - 48px)" }} placeholder="from" value={from} onChange={setFrom} options={opts} />
+      <Select style={{ width: 240, maxWidth: "calc(100vw - 48px)" }} placeholder="to" value={to} onChange={setTo} options={opts} />
+    </Space>
+  );
 
   return (
     <div>
@@ -85,6 +94,7 @@ export function SnapshotHistory() {
             rowKey="ts"
             size="small"
             pagination={false}
+            scroll={{ x: 520 }}
             columns={[
               { title: "Snapshot", dataIndex: "ts", render: (ts: string) => fmtSnapshotTs(ts) },
               { title: "Packages", dataIndex: "package_count", width: 100 },
@@ -104,13 +114,9 @@ export function SnapshotHistory() {
 
       <Card
         title="Diff between snapshots"
-        extra={
-          <Space>
-            <Select style={{ width: 240 }} placeholder="from" value={from} onChange={setFrom} options={opts} />
-            <Select style={{ width: 240 }} placeholder="to" value={to} onChange={setTo} options={opts} />
-          </Space>
-        }
+        extra={mobile ? undefined : pickers}
       >
+        {mobile && <div style={{ marginBottom: 12 }}>{pickers}</div>}
         {!diff ? (
           <Empty description="Pick two different snapshots" />
         ) : (

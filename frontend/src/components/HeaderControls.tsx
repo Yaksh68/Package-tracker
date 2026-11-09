@@ -12,7 +12,8 @@ import { ROLE_LABEL } from "../lib/permissions";
 import { useSession } from "../session";
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal";
 
-export function WorkspaceSwitcher() {
+/** `block`: full width, for the phone menu drawer. */
+export function WorkspaceSwitcher({ block = false }: { block?: boolean }) {
   const { me, switchWorkspace } = useSession();
   const [creating, setCreating] = useState(false);
   return (
@@ -21,7 +22,7 @@ export function WorkspaceSwitcher() {
         aria-label="Workspace"
         value={me.workspace_id}
         onChange={(id) => switchWorkspace(id)}
-        style={{ minWidth: 180, maxWidth: 260 }}
+        style={block ? { width: "100%" } : { minWidth: 180, maxWidth: 260 }}
         popupMatchSelectWidth={false}
         options={me.workspaces.map((w) => ({
           value: w.id,

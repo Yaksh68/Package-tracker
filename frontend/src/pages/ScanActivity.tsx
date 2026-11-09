@@ -116,7 +116,7 @@ export function ScanActivity() {
         </Space>
         <Select
           allowClear
-          style={{ width: 300 }}
+          style={{ width: 300, maxWidth: "calc(100vw - 24px)" }}
           placeholder="Live (current run) — or pick a past snapshot"
           value={ts}
           onChange={setTs}
@@ -162,6 +162,7 @@ export function ScanActivity() {
             dataSource={entries.map((e, i) => ({ ...e, _k: i }))}
             rowKey="_k"
             size="small"
+            scroll={{ x: 640 }}
             // tint error rows so they're findable while scrolling an unfiltered trace
             onRow={(r) => (r.level === "error"
               ? { style: { background: token.colorErrorBg } }

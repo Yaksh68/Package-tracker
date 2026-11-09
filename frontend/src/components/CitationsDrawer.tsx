@@ -2,6 +2,7 @@ import { Descriptions, Drawer, List, Space, Tag, Tooltip, Typography } from "ant
 import { fmtDate, fmtSnapshotTs } from "../format";
 import type { CitationSource, Component } from "../types";
 import { FlagBadge } from "./FlagBadge";
+import { useDrawerWidth } from "../lib/responsive";
 
 const { Paragraph, Link, Text } = Typography;
 
@@ -29,12 +30,13 @@ export function CitationsDrawer({
   component: Component | null;
   onClose: () => void;
 }) {
+  const drawerWidth = useDrawerWidth(520);
   return (
     <Drawer
       title={component ? `${component.name} ${component.version ?? ""}` : ""}
       open={!!component}
       onClose={onClose}
-      width={520}
+      width={drawerWidth}
     >
       {component && (
         <Space direction="vertical" size="large" style={{ width: "100%" }}>

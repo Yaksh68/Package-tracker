@@ -137,7 +137,36 @@ describe("roles", () => {
     const add = [...document.querySelectorAll("button")].filter((b) => b.textContent?.includes("Add repository"));
     expect(add).toHaveLength(1);
     expect(add[0].disabled).toBe(true);
-    // a Viewer can't read the audit log, so it isn't in the menu
+    // the desktop menu is there, but a Viewer can't read the audit log
+    expect(text()).toContain("Settings");
     expect(text()).not.toContain("Audit log");
+  });
+});
+
+describe("phones", () => {
+  afterEach(() => {
+    window.__screenWidth = undefined;
+  });
+
+  it("puts the menu and the workspace switcher in a drawer", async () => {
+    window.__screenWidth = 390;
+    backend({
+      "/api/me": () => json(200, VIEWER),
+      "/api/repos": () => json(200, []),
+      "/api/invites": () => json(200, []),
+    });
+    await render("/");
+    await waitFor(() => text().includes("No repositories yet."));
+    const menuButton = document.querySelector<HTMLButtonElement>('button[aria-label="Menu"]');
+    expect(menuButton).not.toBeNull();
+    expect(document.querySelector(".ant-menu-horizontal")).toBeNull(); // no menu bar on a phone
+    await act(async () => {
+      menuButton!.click();
+    });
+    await waitFor(() => !!document.querySelector(".ant-drawer .ant-menu-inline"));
+    const drawer = document.querySelector(".ant-drawer")!;
+    expect(drawer.textContent).toContain("Repositories");
+    expect(drawer.textContent).toContain("Settings");
+    expect(drawer.querySelector('[aria-label="Workspace"]')).not.toBeNull();
   });
 });
