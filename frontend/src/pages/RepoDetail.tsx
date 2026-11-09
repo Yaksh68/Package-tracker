@@ -67,6 +67,7 @@ export function RepoDetail() {
     if ((was === "running" || was === "queued") && status && !["running", "queued"].includes(status.state)) {
       qc.invalidateQueries({ queryKey: ["snapshots", id, branch] });
       qc.invalidateQueries({ queryKey: ["repos"] });
+      qc.invalidateQueries({ queryKey: ["repo", id] }); // "scanned … ago" in the header
       if (status.state === "error") message.error("Scan failed — see Activity for details");
       else if (!pinnedTs) message.success("Scan finished — showing the new results");
     }
