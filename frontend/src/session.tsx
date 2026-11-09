@@ -74,11 +74,13 @@ export function SessionGate({ children }: { children: ReactNode }) {
   }, [qc]);
 
   // A remembered workspace the user has since left (or that was deleted):
-  // forget it, and the server falls back to the personal workspace.
+  // forget it and ask again; the server falls back to the personal workspace.
+  // Reset, don't just clear: clearing drops the cache, but nothing would fetch
+  // /api/me again and the gate would spin forever.
   useEffect(() => {
     if (staleWorkspace) {
       setActiveWorkspace(null);
-      qc.clear();
+      void qc.resetQueries();
     }
   }, [staleWorkspace, qc]);
 

@@ -118,6 +118,22 @@ describe("sessions", () => {
     expect(text()).toContain("Sign in with GitHub");
   });
 
+  it("forgets a remembered workspace the user has since left, instead of spinning", async () => {
+    setActiveWorkspace("gone");
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const path = url.split("?")[0];
+      if (path === "/api/me") {
+        return new Headers(init?.headers).get("X-Workspace") === "gone"
+          ? json(404, { detail: "workspace not found" })
+          : json(200, VIEWER);
+      }
+      if (path === "/api/repos" || path === "/api/invites") return json(200, []);
+      return json(404, { detail: "not found" });
+    }));
+    await render("/");
+    await waitFor(() => text().includes("No repositories yet."));
+  });
+
   it("explains a sign-up cap", async () => {
     backend({ "/api/me": () => json(401, { detail: "sign in first" }), "/api/info": () => json(200, INFO) });
     await render("/login?error=full");
