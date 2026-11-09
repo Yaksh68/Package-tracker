@@ -13,7 +13,7 @@ export function SnapshotPicker({
 }) {
   return (
     <Select
-      style={{ width: 300 }}
+      style={{ width: 300, maxWidth: "calc(100vw - 24px)" }}
       value={value}
       onChange={onChange}
       placeholder="No scans yet"

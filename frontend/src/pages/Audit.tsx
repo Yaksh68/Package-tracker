@@ -121,6 +121,7 @@ export function AuditPage() {
           dataSource={events}
           pagination={false}
           locale={{ emptyText: "Nothing recorded yet" }}
+          scroll={{ x: 900 }}
           columns={[
             {
               title: "When",

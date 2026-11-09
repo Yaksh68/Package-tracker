@@ -749,6 +749,18 @@ packages on every scan, so `ai_checked` is now a within-scan guard only.
   Any later 401 from another call re-checks `/api/me`. A 401 from `/api/me`
   itself must not, or a signed-out page would re-check forever.
   `safeNext` keeps `next` on this site.
+- **Phones** (`lib/responsive.ts`: `useIsMobile()` is true below 768px, antd's
+  `md`):
+  - the header keeps the logo, invites, theme and account, and a menu button
+    opens a drawer with the pages and the workspace switcher;
+  - the page padding drops to 12px, and drawers (citations, admin) take the
+    whole width (`useDrawerWidth`);
+  - toolbars wrap, and every table has a minimum width (`scroll={{ x: … }}`), so
+    on a phone it scrolls sideways inside its card while the page stays put;
+  - the package table pins Name and hides Ecosystem and Confidence below 992px.
+
+  The tests' `matchMedia` answers for a 1280px desktop; a test sets
+  `window.__screenWidth` (e.g. 390) for the phone layout.
 - **`lib/permissions.ts`** — `can`, `minRole`, `needsRole`, `roleIn`. The role
   table comes from `/api/me` (`role_permissions`), so it can't drift from the
   server's. A repo's page asks about the repo's own workspace (`roleIn`),

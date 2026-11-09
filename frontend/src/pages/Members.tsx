@@ -88,6 +88,7 @@ function MembersCard({ wsId }: { wsId: string }) {
         loading={q.isLoading}
         dataSource={members}
         pagination={false}
+        scroll={{ x: 600 }}
         columns={[
           { title: "Member", render: (_, m) => <MemberCell m={m} you={m.user_id === me.user.id} /> },
           {
@@ -176,7 +177,7 @@ function InviteCard({ wsId }: { wsId: string }) {
           {kind === "login" && (
             <Input
               disabled={!allowed}
-              style={{ width: 240 }}
+              style={{ width: 240, maxWidth: "calc(100vw - 72px)" }}
               prefix="@"
               placeholder="github-username"
               value={login}
@@ -249,6 +250,7 @@ function PendingInvitesCard({ wsId }: { wsId: string }) {
         rowKey="id"
         dataSource={q.data}
         pagination={false}
+        scroll={{ x: 480 }}
         columns={[
           { title: "For", render: (_, i) => (i.github_login ? `@${i.github_login}` : <Tag>one-time link</Tag>) },
           { title: "Role", width: 120, render: (_, i) => <RoleTag role={i.role} /> },

@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
 import { fmtDate, fmtDateTime, fmtRelative } from "../format";
 import { ROLE_LABEL } from "../lib/permissions";
+import { useDrawerWidth, useIsMobile } from "../lib/responsive";
 import { useSession } from "../session";
 import type { AdminUser, AdminWorkspace, LimitValues } from "../types";
 
@@ -45,6 +46,7 @@ function UsersTab() {
       <Table<AdminUser>
         rowKey="id"
         size="small"
+        scroll={{ x: 860 }}
         loading={q.isLoading}
         dataSource={q.data}
         pagination={{ pageSize: 50, hideOnSinglePage: true }}
@@ -124,6 +126,7 @@ function LimitsTab() {
   const qc = useQueryClient();
   const { message } = App.useApp();
   const q = useQuery({ queryKey: ["admin", "limits"], queryFn: api.adminLimits });
+  const mobile = useIsMobile();
   const [values, setValues] = useState<LimitValues>({});
   useEffect(() => {
     if (q.data) setValues(q.data.limits);
@@ -145,7 +148,12 @@ function LimitsTab() {
         Every workspace gets these, unless you give it its own values (Workspaces, then Details). Changes are recorded
         in the platform's audit entries.
       </Typography.Paragraph>
-      <Form layout="horizontal" labelCol={{ flex: "320px" }} labelAlign="left" style={{ maxWidth: 640 }}>
+      <Form
+        layout={mobile ? "vertical" : "horizontal"}
+        labelCol={mobile ? undefined : { flex: "320px" }}
+        labelAlign="left"
+        style={{ maxWidth: 640 }}
+      >
         {Object.keys(defaults).map((name) => (
           <Form.Item key={name} label={labels[name]} style={{ marginBottom: 12 }}
             extra={values[name] !== defaults[name] ? `Default: ${defaults[name]}` : undefined}>
@@ -231,8 +239,9 @@ function WorkspaceLimits({ id }: { id: string }) {
 function WorkspaceDrawer({ id, onClose }: { id: string | null; onClose: () => void }) {
   const q = useQuery({ queryKey: ["admin", "workspace", id], queryFn: () => api.adminWorkspace(id!), enabled: !!id });
   const ws = q.data;
+  const drawerWidth = useDrawerWidth(560);
   return (
-    <Drawer title={ws?.name ?? "Workspace"} open={!!id} onClose={onClose} width={560}>
+    <Drawer title={ws?.name ?? "Workspace"} open={!!id} onClose={onClose} width={drawerWidth}>
       {q.isError && <Alert type="error" showIcon message={errorMessage(q.error)} />}
       {ws && (
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -288,6 +297,7 @@ function WorkspacesTab() {
       <Table<AdminWorkspace>
         rowKey="id"
         size="small"
+        scroll={{ x: 620 }}
         loading={q.isLoading}
         dataSource={q.data}
         pagination={{ pageSize: 50, hideOnSinglePage: true }}

@@ -151,7 +151,7 @@ export function RepoDetail() {
           />
           <ScanStatusPill state={status?.state} phase={status?.phase} position={status?.queue_position} />
         </Space>
-        <Space>
+        <Space wrap>
           <AiStatusTag status={currentSnapshot?.ai_status} detail={currentSnapshot?.ai_detail} />
           <SnapshotPicker
             snapshots={snapshots}

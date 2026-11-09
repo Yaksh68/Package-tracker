@@ -102,7 +102,7 @@ export function ComponentTable({ components, loading, onSelect, emptyText }: Pro
           placeholder="Search name"
           allowClear
           onChange={(e) => setSearch(e.target.value)}
-          style={{ width: 220 }}
+          style={{ width: 220, maxWidth: "calc(100vw - 24px)" }}
         />
         <Select
           placeholder="Ecosystem"
@@ -144,6 +144,9 @@ export function ComponentTable({ components, loading, onSelect, emptyText }: Pro
       <Table<Component>
         dataSource={rows}
         loading={loading}
+        // a phone scrolls the table sideways instead of crushing its columns
+        // (the page itself stays put); wider screens fill the width as before
+        scroll={{ x: 760 }}
         rowKey={(c) => keys.get(c) ?? `${c.ecosystem}:${c.name}`}
         locale={emptyText ? { emptyText } : undefined}
         size="small"
@@ -162,6 +165,9 @@ export function ComponentTable({ components, loading, onSelect, emptyText }: Pro
           {
             title: "Name",
             dataIndex: "name",
+            // stays in view while the rest scrolls sideways on a phone
+            fixed: "left",
+            width: 180,
             sorter: (a, b) => a.name.localeCompare(b.name),
             render: (name: string, c: Component) => (
               <Space size={6}>
@@ -215,8 +221,12 @@ export function ComponentTable({ components, loading, onSelect, emptyText }: Pro
             // soonest first; no date last
             sorter: (a, b) => (a.eol_date ?? "9999").localeCompare(b.eol_date ?? "9999"),
           },
-          { title: "Ecosystem", dataIndex: "ecosystem", width: 120 },
-          { title: "Confidence", dataIndex: "confidence", width: 110, render: (v: string | null) => v ?? dash },
+          // secondary details: shown from tablet width up
+          { title: "Ecosystem", dataIndex: "ecosystem", width: 120, responsive: ["lg"] },
+          {
+            title: "Confidence", dataIndex: "confidence", width: 110, responsive: ["lg"],
+            render: (v: string | null) => v ?? dash,
+          },
         ]}
       />
     </Space>
